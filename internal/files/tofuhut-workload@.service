@@ -1,0 +1,10 @@
+[Unit]
+Description=Tofuhut workload %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/lib/tofuhut/workloads/%i
+EnvironmentFile=-/etc/tofuhut/workloads/%i.env
+ExecStart=tofuhut workload run %i
