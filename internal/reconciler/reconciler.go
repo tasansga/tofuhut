@@ -3,6 +3,7 @@ package reconciler
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,11 @@ import (
 const (
 	defaultWorkDirBase = "/var/lib/tofuhut/workloads"
 	defaultEnvDir      = "/etc/tofuhut/workloads"
+)
+
+var (
+	workDirBase = defaultWorkDirBase
+	envDir      = defaultEnvDir
 )
 
 // ExitCodeError is returned when a command should exit with a specific code.
@@ -39,17 +45,20 @@ func (e *ExitCodeError) Unwrap() error {
 
 // EnvFilePath returns the workload env file path.
 func EnvFilePath(workload string) string {
-	return filepath.Join(defaultEnvDir, workload+".env")
+	return filepath.Join(envDir, workload+".env")
 }
 
 // WorkDirPath returns the workload working directory path.
 func WorkDirPath(workload string) string {
-	return filepath.Join(defaultWorkDirBase, workload)
+	return filepath.Join(workDirBase, workload)
 }
 
 // Run executes the OpenTofu reconciler flow for the given workload name.
 func Run(workload string, cfg Config, envFile string, envFromFile map[string]string) error {
-	workdir := filepath.Join(defaultWorkDirBase, workload)
+	workdir := filepath.Join(workDirBase, workload)
+	planTextPath := filepath.Join(workdir, fmt.Sprintf("%s-plan.txt", workload))
+	planFilePath := filepath.Join(workdir, "plan.tfplan")
+	approvePath := filepath.Join(workdir, "approve")
 
 	if _, err := os.Stat(workdir); err != nil {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload directory %s not found", workdir)}
@@ -78,7 +87,7 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 	}
 
 	logrus.Infof("[tofu] Initializing workload %s", workload)
-	if code, err := runCommand(cmdEnv, "tofu", initArgs...); err != nil {
+	if code, err := runCommand(commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", initArgs...); err != nil {
 		exitCode = 1
 		return &ExitCodeError{Code: 1, Err: err}
 	} else if code != 0 {
@@ -86,9 +95,45 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 		return &ExitCodeError{Code: code, Err: fmt.Errorf("tofu init failed (rc=%d)", code)}
 	}
 
+	planExists := fileExists(planFilePath)
+	approveExists := fileExists(approvePath)
+	if cfg.Mode == "apply" {
+		if planExists {
+			if !approveExists {
+				logrus.Infof("[tofu] Plan pending approval for %s", workload)
+				return nil
+			}
+			logrus.Infof("[tofu] Approval found for %s, applying stored plan", workload)
+			applyArgs := []string{"apply", "-input=false", "-auto-approve", planFilePath}
+			if code, err := runCommand(commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
+				exitCode = 1
+				return &ExitCodeError{Code: 1, Err: err}
+			} else if code != 0 {
+				exitCode = code
+				return &ExitCodeError{Code: code, Err: fmt.Errorf("tofu apply failed (rc=%d)", code)}
+			}
+			_ = os.Remove(planFilePath)
+			_ = os.Remove(planTextPath)
+			_ = os.Remove(approvePath)
+			return nil
+		}
+		if approveExists {
+			logrus.Warnf("[tofu] Approval file exists without a plan for %s; removing approval and replanning", workload)
+			_ = os.Remove(approvePath)
+		}
+	}
+
 	logrus.Infof("[tofu] Planning workload %s", workload)
 	planArgs := []string{"plan", "-input=false", "-no-color", "-detailed-exitcode"}
-	planCode, err := runCommand(cmdEnv, "tofu", planArgs...)
+	if cfg.Mode == "apply" {
+		planArgs = append(planArgs, "-out", planFilePath)
+	}
+	var planOut bytes.Buffer
+	planCode, err := runCommand(commandOptions{
+		Env:    cmdEnv,
+		Dir:    workdir,
+		Stdout: io.MultiWriter(os.Stdout, &planOut),
+	}, "tofu", planArgs...)
 	if err != nil {
 		exitCode = 1
 		return &ExitCodeError{Code: 1, Err: err}
@@ -97,34 +142,69 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 	switch planCode {
 	case 0:
 		logrus.Infof("[tofu] No changes for %s", workload)
+		if cfg.Mode == "apply" {
+			_ = os.Remove(planFilePath)
+			_ = os.Remove(planTextPath)
+		}
 		return nil
 	case 2:
 		logrus.Infof("[tofu] Changes detected for %s", workload)
+		if cfg.Mode == "apply" {
+			if err := os.WriteFile(planTextPath, planOut.Bytes(), 0600); err != nil {
+				exitCode = 1
+				return &ExitCodeError{Code: 1, Err: fmt.Errorf("failed to write plan output: %w", err)}
+			}
+			if fileExists(planFilePath) {
+				_ = os.Chmod(planFilePath, 0600)
+			}
+			logrus.Infof("[tofu] Plan written to %s; approval required", planTextPath)
+			notifyNtfy(cfg, workload, planTextPath)
+		}
+		if cfg.Mode == "auto-apply" {
+			logrus.Infof("[tofu] Auto-apply enabled for %s", workload)
+			applyArgs := []string{"apply", "-input=false", "-auto-approve"}
+			if code, err := runCommand(commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
+				exitCode = 1
+				return &ExitCodeError{Code: 1, Err: err}
+			} else if code != 0 {
+				exitCode = code
+				return &ExitCodeError{Code: code, Err: fmt.Errorf("tofu apply failed (rc=%d)", code)}
+			}
+		}
+		return nil
 	default:
 		exitCode = planCode
 		return &ExitCodeError{Code: planCode, Err: fmt.Errorf("tofu plan failed (rc=%d)", planCode)}
 	}
-
-	if cfg.Mode == "apply" {
-		logrus.Infof("[tofu] Applying workload %s", workload)
-		applyArgs := []string{"apply", "-input=false", "-auto-approve"}
-		if code, err := runCommand(cmdEnv, "tofu", applyArgs...); err != nil {
-			exitCode = 1
-			return &ExitCodeError{Code: 1, Err: err}
-		} else if code != 0 {
-			exitCode = code
-			return &ExitCodeError{Code: code, Err: fmt.Errorf("tofu apply failed (rc=%d)", code)}
-		}
-	}
-
-	return nil
 }
 
-func runCommand(env []string, name string, args ...string) (int, error) {
+type commandOptions struct {
+	Env    []string
+	Dir    string
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+func runCommand(opts commandOptions, name string, args ...string) (int, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = env
+	if opts.Stdout != nil {
+		cmd.Stdout = opts.Stdout
+	} else {
+		cmd.Stdout = os.Stdout
+	}
+	if opts.Stderr != nil {
+		cmd.Stderr = opts.Stderr
+	} else {
+		cmd.Stderr = os.Stderr
+	}
+	if opts.Env != nil {
+		cmd.Env = opts.Env
+	} else {
+		cmd.Env = os.Environ()
+	}
+	if opts.Dir != "" {
+		cmd.Dir = opts.Dir
+	}
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -257,6 +337,11 @@ func diffEnv(before, after map[string]string) map[string]string {
 	return result
 }
 
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // MergeConfig applies env file values to the config unless locked by CLI flags.
 func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, error) {
 	if !locks.Mode {
@@ -267,8 +352,8 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 	if cfg.Mode == "" {
 		cfg.Mode = "plan"
 	}
-	if cfg.Mode != "plan" && cfg.Mode != "apply" {
-		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid MODE %q: must be plan or apply", cfg.Mode)}
+	if cfg.Mode != "plan" && cfg.Mode != "apply" && cfg.Mode != "auto-apply" {
+		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid MODE %q: must be plan, apply, or auto-apply", cfg.Mode)}
 	}
 
 	if !locks.Upgrade {
@@ -293,6 +378,21 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 	if !locks.GatusToken {
 		if value, ok := env["GATUS_CLI_TOKEN"]; ok {
 			cfg.GatusToken = value
+		}
+	}
+	if !locks.NtfyURL {
+		if value, ok := env["NTFY_URL"]; ok {
+			cfg.NtfyURL = value
+		}
+	}
+	if !locks.NtfyTopic {
+		if value, ok := env["NTFY_TOPIC"]; ok {
+			cfg.NtfyTopic = value
+		}
+	}
+	if !locks.NtfyToken {
+		if value, ok := env["NTFY_TOKEN"]; ok {
+			cfg.NtfyToken = value
 		}
 	}
 

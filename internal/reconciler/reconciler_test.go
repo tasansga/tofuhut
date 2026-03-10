@@ -1,0 +1,227 @@
+package reconciler
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func setupFakeTofu(t *testing.T, dir string, script string) {
+	t.Helper()
+	path := filepath.Join(dir, "tofu")
+	if strings.Contains(script, "__TOFUHUT_PLAN_FILE__") {
+		planPath := filepath.Join(workDirBase, "workload", "plan.tfplan")
+		script = strings.ReplaceAll(script, "__TOFUHUT_PLAN_FILE__", planPath)
+	}
+	err := os.WriteFile(path, []byte(script), 0755)
+	assert.NoError(t, err)
+
+	oldPath := os.Getenv("PATH")
+	assert.NoError(t, os.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath))
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", oldPath)
+	})
+}
+
+func newWorkloadDir(t *testing.T, base string) string {
+	t.Helper()
+	err := os.MkdirAll(base, 0755)
+	assert.NoError(t, err)
+	return base
+}
+
+func withTempDirs(t *testing.T) (string, string) {
+	t.Helper()
+	oldWorkDirBase := workDirBase
+	oldEnvDir := envDir
+
+	workDirBase = t.TempDir()
+	envDir = t.TempDir()
+
+	t.Cleanup(func() {
+		workDirBase = oldWorkDirBase
+		envDir = oldEnvDir
+	})
+
+	return workDirBase, envDir
+}
+
+func TestRunPlanOnlyNoChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	planPath := filepath.Join(workdir, "plan.tfplan")
+
+	tmpBin := t.TempDir()
+	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
+
+	cfg := Config{Mode: "plan"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.NoFileExists(t, planPath)
+}
+
+func TestRunApplyWritesPlanAndWaitsForApproval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	planPath := filepath.Join(workdir, "plan.tfplan")
+	planTextPath := filepath.Join(workdir, "workload-plan.txt")
+
+	tmpBin := t.TempDir()
+	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then echo \"planned\"; touch \"__TOFUHUT_PLAN_FILE__\"; exit 2; fi\nexit 0\n")
+
+	cfg := Config{Mode: "apply"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.FileExists(t, planTextPath)
+	assert.FileExists(t, planPath)
+	assertFileMode(t, planTextPath, 0600)
+	assertFileMode(t, planPath, 0600)
+}
+
+func TestRunApplyUsesApprovedPlan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	planPath := filepath.Join(workdir, "plan.tfplan")
+	planTextPath := filepath.Join(workdir, "workload-plan.txt")
+	approvePath := filepath.Join(workdir, "approve")
+	applyLog := filepath.Join(workdir, "apply.log")
+
+	assert.NoError(t, os.WriteFile(planPath, []byte("binary"), 0644))
+	assert.NoError(t, os.WriteFile(planTextPath, []byte("text"), 0644))
+	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0644))
+
+	tmpBin := t.TempDir()
+	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
+
+	cfg := Config{Mode: "apply"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+
+	assert.NoFileExists(t, planPath)
+	assert.NoFileExists(t, planTextPath)
+	assert.NoFileExists(t, approvePath)
+
+	data, err := os.ReadFile(applyLog)
+	assert.NoError(t, err)
+	assert.True(t, strings.Contains(string(data), "apply -input=false -auto-approve "+planPath))
+}
+
+func TestRunApplyStaleApprovalRemoved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	approvePath := filepath.Join(workdir, "approve")
+	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0644))
+
+	tmpBin := t.TempDir()
+	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
+
+	cfg := Config{Mode: "apply"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.NoFileExists(t, approvePath)
+}
+
+func TestRunAutoApplyAppliesImmediately(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	applyLog := filepath.Join(workdir, "apply.log")
+
+	tmpBin := t.TempDir()
+	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 2; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
+
+	cfg := Config{Mode: "auto-apply"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(applyLog)
+	assert.NoError(t, err)
+	assert.True(t, strings.Contains(string(data), "apply -input=false -auto-approve"))
+}
+
+func TestRunApplyNoChangesCleansPlanArtifacts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	planPath := filepath.Join(workdir, "plan.tfplan")
+	planTextPath := filepath.Join(workdir, "workload-plan.txt")
+
+	tmpBin := t.TempDir()
+	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then touch \"__TOFUHUT_PLAN_FILE__\"; exit 0; fi\nexit 0\n")
+
+	cfg := Config{Mode: "apply"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.NoFileExists(t, planPath)
+	assert.NoFileExists(t, planTextPath)
+}
+
+func TestRunCommandEmptyEnvPreserved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	tmpDir := t.TempDir()
+	envLog := filepath.Join(tmpDir, "env.log")
+
+	setupFakeTofu(t, tmpDir, "#!/bin/sh\nenv > \""+envLog+"\"\nexit 0\n")
+
+	_, err := runCommand(commandOptions{Env: []string{}}, "tofu")
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(envLog)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Some shells inject PWD/SHLVL/_ even with an empty environment.
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		assert.True(t,
+			strings.HasPrefix(line, "PWD=") ||
+				strings.HasPrefix(line, "SHLVL=") ||
+				strings.HasPrefix(line, "_="),
+			"unexpected env line: %s",
+			line,
+		)
+	}
+}
+
+func assertFileMode(t *testing.T, path string, expected os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, info.Mode().Perm())
+}

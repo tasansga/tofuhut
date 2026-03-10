@@ -45,3 +45,10 @@ func TestMergeConfigInvalidMode(t *testing.T) {
 	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
 	assert.Error(t, err)
 }
+
+func TestMergeConfigAutoApply(t *testing.T) {
+	env := map[string]string{"MODE": "auto-apply"}
+	merged, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.NoError(t, err)
+	assert.Equal(t, "auto-apply", merged.Mode)
+}

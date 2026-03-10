@@ -56,6 +56,9 @@ func (e *ExitCodeError) Unwrap() error {
 func init() {
 	rootCmd.PersistentFlags().String("gatus-cli-url", "", "Gatus CLI URL (env GATUS_CLI_URL)")
 	rootCmd.PersistentFlags().String("gatus-cli-token", "", "Gatus CLI token (env GATUS_CLI_TOKEN)")
+	rootCmd.PersistentFlags().String("ntfy-url", "", "ntfy base URL (env NTFY_URL)")
+	rootCmd.PersistentFlags().String("ntfy-topic", "", "ntfy topic (env NTFY_TOPIC)")
+	rootCmd.PersistentFlags().String("ntfy-token", "", "ntfy access token (env NTFY_TOKEN)")
 	rootCmd.PersistentFlags().String("mode", "", "Run mode: plan or apply (env MODE)")
 	rootCmd.PersistentFlags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
 	rootCmd.PersistentFlags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
@@ -77,6 +80,9 @@ func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLock
 	reconfigure, reconfigureLocked := resolveBool(cmd, "reconfigure", "RECONFIGURE")
 	gatusURL, gatusURLLocked := resolveString(cmd, "gatus-cli-url", "GATUS_CLI_URL")
 	gatusToken, gatusTokenLocked := resolveString(cmd, "gatus-cli-token", "GATUS_CLI_TOKEN")
+	ntfyURL, ntfyURLLocked := resolveString(cmd, "ntfy-url", "NTFY_URL")
+	ntfyTopic, ntfyTopicLocked := resolveString(cmd, "ntfy-topic", "NTFY_TOPIC")
+	ntfyToken, ntfyTokenLocked := resolveString(cmd, "ntfy-token", "NTFY_TOKEN")
 
 	cfg := reconciler.Config{
 		Mode:        mode,
@@ -84,6 +90,9 @@ func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLock
 		Reconfigure: reconfigure,
 		GatusURL:    gatusURL,
 		GatusToken:  gatusToken,
+		NtfyURL:     ntfyURL,
+		NtfyTopic:   ntfyTopic,
+		NtfyToken:   ntfyToken,
 	}
 	locks := reconciler.ConfigLocks{
 		Mode:        modeLocked,
@@ -91,6 +100,9 @@ func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLock
 		Reconfigure: reconfigureLocked,
 		GatusURL:    gatusURLLocked,
 		GatusToken:  gatusTokenLocked,
+		NtfyURL:     ntfyURLLocked,
+		NtfyTopic:   ntfyTopicLocked,
+		NtfyToken:   ntfyTokenLocked,
 	}
 	return cfg, locks, nil
 }

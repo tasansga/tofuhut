@@ -7,6 +7,9 @@ type Config struct {
 	Reconfigure bool
 	GatusURL    string
 	GatusToken  string
+	NtfyURL     string
+	NtfyTopic   string
+	NtfyToken   string
 }
 
 // ConfigLocks marks fields explicitly set by CLI flags.
@@ -17,4 +20,7 @@ type ConfigLocks struct {
 	Reconfigure bool
 	GatusURL    bool
 	GatusToken  bool
+	NtfyURL     bool
+	NtfyTopic   bool
+	NtfyToken   bool
 }
