@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -36,18 +37,22 @@ func (e *ExitCodeError) Unwrap() error {
 	return e.Err
 }
 
+// EnvFilePath returns the workload env file path.
+func EnvFilePath(workload string) string {
+	return filepath.Join(defaultEnvDir, workload+".env")
+}
+
+// WorkDirPath returns the workload working directory path.
+func WorkDirPath(workload string) string {
+	return filepath.Join(defaultWorkDirBase, workload)
+}
+
 // Run executes the OpenTofu reconciler flow for the given workload name.
-func Run(workload string, cfg Config) error {
+func Run(workload string, cfg Config, envFile string, envFromFile map[string]string) error {
 	workdir := filepath.Join(defaultWorkDirBase, workload)
-	envFile := filepath.Join(defaultEnvDir, workload+".env")
 
 	if _, err := os.Stat(workdir); err != nil {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload directory %s not found", workdir)}
-	}
-
-	envFromFile, err := loadEnvFile(envFile)
-	if err != nil {
-		return &ExitCodeError{Code: 1, Err: err}
 	}
 
 	cmdEnv := mergeEnv(filterEnv(os.Environ()), envFromFile)
@@ -130,7 +135,8 @@ func runCommand(env []string, name string, args ...string) (int, error) {
 	return 0, nil
 }
 
-func loadEnvFile(path string) (map[string]string, error) {
+// LoadEnvFile sources the env file and returns only the variables set/changed by the file.
+func LoadEnvFile(path string) (map[string]string, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return map[string]string{}, nil
@@ -138,7 +144,7 @@ func loadEnvFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("unable to read env file %s: %w", path, err)
 	}
 
-	cmd := exec.Command("bash", "-lc", fmt.Sprintf("set -a; source %q; env -0", path))
+	cmd := exec.Command("bash", "-lc", fmt.Sprintf("env -0; printf '__TOFUHUT_ENV_SPLIT__\\0'; set -a; source %q; env -0", path))
 	cmd.Env = os.Environ()
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -148,18 +154,15 @@ func loadEnvFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("failed to source env file %s: %w", path, err)
 	}
 
-	result := make(map[string]string)
-	for _, entry := range bytes.Split(out.Bytes(), []byte{0}) {
-		if len(entry) == 0 {
-			continue
-		}
-		kv := strings.SplitN(string(entry), "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		result[kv[0]] = kv[1]
+	marker := []byte("__TOFUHUT_ENV_SPLIT__\x00")
+	data := out.Bytes()
+	idx := bytes.Index(data, marker)
+	if idx == -1 {
+		return nil, fmt.Errorf("failed to parse env file %s", path)
 	}
-	return result, nil
+	before := parseEnvBlob(data[:idx])
+	after := parseEnvBlob(data[idx+len(marker):])
+	return diffEnv(before, after), nil
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {
@@ -227,4 +230,71 @@ func setDefaultEnvValue(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+func parseEnvBlob(blob []byte) map[string]string {
+	result := make(map[string]string)
+	for _, entry := range bytes.Split(blob, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		kv := strings.SplitN(string(entry), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		result[kv[0]] = kv[1]
+	}
+	return result
+}
+
+func diffEnv(before, after map[string]string) map[string]string {
+	result := make(map[string]string)
+	for key, value := range after {
+		if beforeValue, ok := before[key]; !ok || beforeValue != value {
+			result[key] = value
+		}
+	}
+	return result
+}
+
+// MergeConfig applies env file values to the config unless locked by CLI flags.
+func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, error) {
+	if !locks.Mode {
+		if value, ok := env["MODE"]; ok {
+			cfg.Mode = value
+		}
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = "plan"
+	}
+	if cfg.Mode != "plan" && cfg.Mode != "apply" {
+		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid MODE %q: must be plan or apply", cfg.Mode)}
+	}
+
+	if !locks.Upgrade {
+		if value, ok := env["UPGRADE"]; ok {
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				cfg.Upgrade = parsed
+			}
+		}
+	}
+	if !locks.Reconfigure {
+		if value, ok := env["RECONFIGURE"]; ok {
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				cfg.Reconfigure = parsed
+			}
+		}
+	}
+	if !locks.GatusURL {
+		if value, ok := env["GATUS_CLI_URL"]; ok {
+			cfg.GatusURL = value
+		}
+	}
+	if !locks.GatusToken {
+		if value, ok := env["GATUS_CLI_TOKEN"]; ok {
+			cfg.GatusToken = value
+		}
+	}
+
+	return cfg, nil
 }

@@ -20,6 +20,11 @@ repos:
         args: [--severity=error]
   - repo: local
     hooks:
+      - id: go-govulncheck
+        name: govulncheck
+        entry: govulncheck ./...
+        language: system
+        pass_filenames: false
       - id: make
         name: Run make
         entry: make

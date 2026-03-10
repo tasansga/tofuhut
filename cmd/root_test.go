@@ -20,9 +20,9 @@ func newTestCmd() *cobra.Command {
 func TestResolveConfigDefaults(t *testing.T) {
 	cmd := newTestCmd()
 
-	cfg, err := resolveConfig(cmd)
+	cfg, _, err := resolveConfig(cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, "plan", cfg.Mode)
+	assert.Equal(t, "", cfg.Mode)
 	assert.False(t, cfg.Upgrade)
 	assert.False(t, cfg.Reconfigure)
 	assert.Equal(t, "", cfg.GatusURL)
@@ -39,7 +39,7 @@ func TestResolveConfigFlagOverridesEnv(t *testing.T) {
 	assert.NoError(t, cmd.Flags().Set("mode", "plan"))
 	assert.NoError(t, cmd.Flags().Set("upgrade", "false"))
 
-	cfg, err := resolveConfig(cmd)
+	cfg, _, err := resolveConfig(cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, "flag-url", cfg.GatusURL)
 	assert.Equal(t, "plan", cfg.Mode)
@@ -50,16 +50,16 @@ func TestResolveConfigInvalidMode(t *testing.T) {
 	t.Setenv("MODE", "invalid")
 	cmd := newTestCmd()
 
-	cfg, err := resolveConfig(cmd)
-	assert.Error(t, err)
-	assert.Equal(t, "", cfg.Mode)
+	cfg, _, err := resolveConfig(cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, "invalid", cfg.Mode)
 }
 
 func TestResolveBoolEnvParsing(t *testing.T) {
 	t.Setenv("UPGRADE", "true")
 	cmd := newTestCmd()
 
-	cfg, err := resolveConfig(cmd)
+	cfg, _, err := resolveConfig(cmd)
 	assert.NoError(t, err)
 	assert.True(t, cfg.Upgrade)
 }

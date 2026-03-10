@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -19,11 +18,12 @@ var rootCmd = &cobra.Command{
 		if isPrintCommand(cmd) {
 			return nil
 		}
-		cfg, err := resolveConfig(cmd)
+		cfg, locks, err := resolveConfig(cmd)
 		if err != nil {
 			return err
 		}
 		resolvedConfig = cfg
+		resolvedConfigLocks = locks
 		return nil
 	},
 }
@@ -64,55 +64,62 @@ func init() {
 }
 
 var resolvedConfig reconciler.Config
+var resolvedConfigLocks reconciler.ConfigLocks
 
 func isPrintCommand(cmd *cobra.Command) bool {
 	path := cmd.CommandPath()
 	return path == "tofuhut print" || strings.HasPrefix(path, "tofuhut print ")
 }
 
-func resolveConfig(cmd *cobra.Command) (reconciler.Config, error) {
-	mode := resolveString(cmd, "mode", "MODE")
-	if mode == "" {
-		mode = "plan"
-	}
-	if mode != "plan" && mode != "apply" {
-		return reconciler.Config{}, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid MODE %q: must be plan or apply", mode)}
-	}
+func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLocks, error) {
+	mode, modeLocked := resolveString(cmd, "mode", "MODE")
+	upgrade, upgradeLocked := resolveBool(cmd, "upgrade", "UPGRADE")
+	reconfigure, reconfigureLocked := resolveBool(cmd, "reconfigure", "RECONFIGURE")
+	gatusURL, gatusURLLocked := resolveString(cmd, "gatus-cli-url", "GATUS_CLI_URL")
+	gatusToken, gatusTokenLocked := resolveString(cmd, "gatus-cli-token", "GATUS_CLI_TOKEN")
 
-	return reconciler.Config{
+	cfg := reconciler.Config{
 		Mode:        mode,
-		Upgrade:     resolveBool(cmd, "upgrade", "UPGRADE"),
-		Reconfigure: resolveBool(cmd, "reconfigure", "RECONFIGURE"),
-		GatusURL:    resolveString(cmd, "gatus-cli-url", "GATUS_CLI_URL"),
-		GatusToken:  resolveString(cmd, "gatus-cli-token", "GATUS_CLI_TOKEN"),
-	}, nil
+		Upgrade:     upgrade,
+		Reconfigure: reconfigure,
+		GatusURL:    gatusURL,
+		GatusToken:  gatusToken,
+	}
+	locks := reconciler.ConfigLocks{
+		Mode:        modeLocked,
+		Upgrade:     upgradeLocked,
+		Reconfigure: reconfigureLocked,
+		GatusURL:    gatusURLLocked,
+		GatusToken:  gatusTokenLocked,
+	}
+	return cfg, locks, nil
 }
 
-func resolveString(cmd *cobra.Command, flagName, envName string) string {
+func resolveString(cmd *cobra.Command, flagName, envName string) (string, bool) {
 	flag := cmd.Flags().Lookup(flagName)
 	if flag != nil && flag.Changed {
 		if value, err := cmd.Flags().GetString(flagName); err == nil {
-			return value
+			return value, true
 		}
 	}
 	if value, ok := os.LookupEnv(envName); ok {
-		return value
+		return value, false
 	}
-	return ""
+	return "", false
 }
 
-func resolveBool(cmd *cobra.Command, flagName, envName string) bool {
+func resolveBool(cmd *cobra.Command, flagName, envName string) (bool, bool) {
 	flag := cmd.Flags().Lookup(flagName)
 	if flag != nil && flag.Changed {
 		if value, err := cmd.Flags().GetBool(flagName); err == nil {
-			return value
+			return value, true
 		}
 	}
 	if value, ok := os.LookupEnv(envName); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
-			return parsed
+			return parsed, false
 		}
 	}
-	return false
+	return false, false
 }

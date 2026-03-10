@@ -2,9 +2,12 @@ package reconciler
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -41,33 +44,19 @@ func (g *gatusHandler) notify(success bool, message string) {
 	token := g.cfg.GatusToken
 	if token == "" {
 		if value, err := g.tokenFromFunction(name); err != nil {
-			logrus.Warnf("gatus-cli token lookup failed: %v", err)
+			logrus.Warnf("gatus token lookup failed: %v", err)
 		} else if value != "" {
 			token = value
 		}
 	}
 
 	if url == "" || token == "" {
-		logrus.Info("gatus-cli not configured - not notifying Gatus")
+		logrus.Info("gatus not configured - not notifying Gatus")
 		return
 	}
 
-	if _, err := exec.LookPath("gatus-cli"); err != nil {
-		logrus.Info("gatus-cli not in PATH - not notifying Gatus")
-		return
-	}
-
-	args := []string{"external-endpoint", "push", "--url=" + url, "--token=" + token, "--key=" + key}
-	if success {
-		args = append(args, "--success=true")
-	} else {
-		args = append(args, "--success=false", "--error="+message)
-	}
-
-	if code, err := runCommand(os.Environ(), "gatus-cli", args...); err != nil {
-		logrus.Warnf("gatus-cli failed: %v", err)
-	} else if code != 0 {
-		logrus.Warnf("gatus-cli exited with rc=%d", code)
+	if err := pushGatus(url, token, key, success, message); err != nil {
+		logrus.Warnf("gatus push failed: %v", err)
 	}
 }
 
@@ -106,4 +95,45 @@ func sanitizeForGatus(value string) string {
 			return r
 		}
 	}, value)
+}
+
+func pushGatus(baseURL, token, key string, success bool, message string) error {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid gatus url %q: %w", baseURL, err)
+	}
+	basePath := strings.TrimSuffix(parsed.Path, "/")
+	apiPrefix := "/api/v1"
+	var path string
+	if strings.HasSuffix(basePath, apiPrefix) {
+		path = fmt.Sprintf("%s/endpoints/%s/external", basePath, url.PathEscape(key))
+	} else {
+		path = fmt.Sprintf("%s/api/v1/endpoints/%s/external", basePath, url.PathEscape(key))
+	}
+	parsed = parsed.ResolveReference(&url.URL{Path: path})
+
+	q := parsed.Query()
+	q.Set("success", fmt.Sprintf("%t", success))
+	if !success && message != "" {
+		q.Set("error", message)
+	}
+	parsed.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodPost, parsed.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected gatus status: %s", resp.Status)
+	}
+	return nil
 }

@@ -8,3 +8,13 @@ type Config struct {
 	GatusURL    string
 	GatusToken  string
 }
+
+// ConfigLocks marks fields explicitly set by CLI flags.
+// Locked fields must not be overridden by workload env files.
+type ConfigLocks struct {
+	Mode        bool
+	Upgrade     bool
+	Reconfigure bool
+	GatusURL    bool
+	GatusToken  bool
+}

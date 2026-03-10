@@ -23,16 +23,27 @@ var workloadRunCmd = &cobra.Command{
 			return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload name is required")}
 		}
 
+		envFile := reconciler.EnvFilePath(name)
+		envFromFile, err := reconciler.LoadEnvFile(envFile)
+		if err != nil {
+			return &ExitCodeError{Code: 1, Err: err}
+		}
+
+		mergedConfig, err := reconciler.MergeConfig(resolvedConfig, resolvedConfigLocks, envFromFile)
+		if err != nil {
+			return &ExitCodeError{Code: 2, Err: err}
+		}
+
 		logrus.WithFields(logrus.Fields{
 			"workload":        name,
-			"mode":            resolvedConfig.Mode,
-			"upgrade":         resolvedConfig.Upgrade,
-			"reconfigure":     resolvedConfig.Reconfigure,
-			"gatus_cli_url":   resolvedConfig.GatusURL,
-			"gatus_has_token": resolvedConfig.GatusToken != "",
+			"mode":            mergedConfig.Mode,
+			"upgrade":         mergedConfig.Upgrade,
+			"reconfigure":     mergedConfig.Reconfigure,
+			"gatus_cli_url":   mergedConfig.GatusURL,
+			"gatus_has_token": mergedConfig.GatusToken != "",
 		}).Debug("starting workload run")
 
-		if err := reconciler.Run(name, resolvedConfig); err != nil {
+		if err := reconciler.Run(name, mergedConfig, envFile, envFromFile); err != nil {
 			logrus.Error(err)
 			if exitErr, ok := err.(*reconciler.ExitCodeError); ok {
 				return &ExitCodeError{Code: exitErr.Code, Err: exitErr}
