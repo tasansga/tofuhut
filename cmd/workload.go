@@ -22,6 +22,9 @@ var workloadRunCmd = &cobra.Command{
 		if name == "" {
 			return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload name is required")}
 		}
+		if err := validateWorkloadName(name); err != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("invalid workload name: %w", err)}
+		}
 
 		envFile := reconciler.EnvFilePath(name)
 		envFromFile, err := reconciler.LoadEnvFile(envFile)

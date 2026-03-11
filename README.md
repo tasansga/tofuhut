@@ -8,6 +8,9 @@ Print embedded templates:
 - `tofuhut print systemd-timer`
 - `tofuhut print workload-env`
 
+Run approval webhook server:
+- `tofuhut approve-server --listen :8080`
+
 **Workload Layout**
 - `/var/lib/tofuhut/workloads/<workload>` is the working directory.
 - `/etc/tofuhut/workloads/<workload>.env` provides workload-specific environment variables.
@@ -20,6 +23,7 @@ Print embedded templates:
 - `RECONFIGURE=true` adds `-reconfigure` to `tofu init`.
 - `GATUS_CLI_URL` and `GATUS_CLI_TOKEN` enable Gatus reporting. Alternatively define a function `gatus_cli_token_for_name` in the env file to supply a token for the workload name.
 - `NTFY_URL`, `NTFY_TOPIC`, and `NTFY_TOKEN` enable ntfy notifications when approval is required.
+- `APPROVE_URL` and `APPROVE_TOKEN` configure the approval webhook used by ntfy action buttons.
 
 **Environment Propagation**
 Tofuhut passes a restricted allowlist of host environment variables to `tofu`, then merges in variables from the workload env file. The allowlist is intentionally minimal (PATH, locale, proxy, certs, temp dirs, and basic user/home fields). Add provider credentials (e.g. AWS_) to the workload env file explicitly.
@@ -40,3 +44,5 @@ When changes are detected, the plan is written to `/var/lib/tofuhut/workloads/<w
 Create `/var/lib/tofuhut/workloads/<workload>/approve` to approve.
 On the next run, if `approve` exists, the stored plan is applied and the plan/approve files are removed.
 A ntfy notification is sent when approval is required if `NTFY_URL` and `NTFY_TOPIC` are set.
+The notification includes an Approve action if `APPROVE_URL` is set.
+If you use the ntfy web app, the approval endpoint must allow CORS from the web app origin (or `*`); `approve-server` sets `Access-Control-Allow-Origin: *`.

@@ -59,6 +59,8 @@ func init() {
 	rootCmd.PersistentFlags().String("ntfy-url", "", "ntfy base URL (env NTFY_URL)")
 	rootCmd.PersistentFlags().String("ntfy-topic", "", "ntfy topic (env NTFY_TOPIC)")
 	rootCmd.PersistentFlags().String("ntfy-token", "", "ntfy access token (env NTFY_TOKEN)")
+	rootCmd.PersistentFlags().String("approve-url", "", "Approval webhook URL for ntfy action (env APPROVE_URL)")
+	rootCmd.PersistentFlags().String("approve-token", "", "Approval webhook token (env APPROVE_TOKEN)")
 	rootCmd.PersistentFlags().String("mode", "", "Run mode: plan or apply (env MODE)")
 	rootCmd.PersistentFlags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
 	rootCmd.PersistentFlags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
@@ -83,26 +85,32 @@ func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLock
 	ntfyURL, ntfyURLLocked := resolveString(cmd, "ntfy-url", "NTFY_URL")
 	ntfyTopic, ntfyTopicLocked := resolveString(cmd, "ntfy-topic", "NTFY_TOPIC")
 	ntfyToken, ntfyTokenLocked := resolveString(cmd, "ntfy-token", "NTFY_TOKEN")
+	approveURL, approveURLLocked := resolveString(cmd, "approve-url", "APPROVE_URL")
+	approveToken, approveTokenLocked := resolveString(cmd, "approve-token", "APPROVE_TOKEN")
 
 	cfg := reconciler.Config{
-		Mode:        mode,
-		Upgrade:     upgrade,
-		Reconfigure: reconfigure,
-		GatusURL:    gatusURL,
-		GatusToken:  gatusToken,
-		NtfyURL:     ntfyURL,
-		NtfyTopic:   ntfyTopic,
-		NtfyToken:   ntfyToken,
+		Mode:         mode,
+		Upgrade:      upgrade,
+		Reconfigure:  reconfigure,
+		GatusURL:     gatusURL,
+		GatusToken:   gatusToken,
+		NtfyURL:      ntfyURL,
+		NtfyTopic:    ntfyTopic,
+		NtfyToken:    ntfyToken,
+		ApproveURL:   approveURL,
+		ApproveToken: approveToken,
 	}
 	locks := reconciler.ConfigLocks{
-		Mode:        modeLocked,
-		Upgrade:     upgradeLocked,
-		Reconfigure: reconfigureLocked,
-		GatusURL:    gatusURLLocked,
-		GatusToken:  gatusTokenLocked,
-		NtfyURL:     ntfyURLLocked,
-		NtfyTopic:   ntfyTopicLocked,
-		NtfyToken:   ntfyTokenLocked,
+		Mode:         modeLocked,
+		Upgrade:      upgradeLocked,
+		Reconfigure:  reconfigureLocked,
+		GatusURL:     gatusURLLocked,
+		GatusToken:   gatusTokenLocked,
+		NtfyURL:      ntfyURLLocked,
+		NtfyTopic:    ntfyTopicLocked,
+		NtfyToken:    ntfyTokenLocked,
+		ApproveURL:   approveURLLocked,
+		ApproveToken: approveTokenLocked,
 	}
 	return cfg, locks, nil
 }

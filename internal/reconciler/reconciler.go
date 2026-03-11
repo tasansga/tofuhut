@@ -23,6 +23,26 @@ var (
 	envDir      = defaultEnvDir
 )
 
+// SetWorkDirBaseForTests overrides the work dir base and returns a restore func.
+// Intended for tests only.
+func SetWorkDirBaseForTests(path string) func() {
+	old := workDirBase
+	workDirBase = path
+	return func() {
+		workDirBase = old
+	}
+}
+
+// SetEnvDirForTests overrides the env dir and returns a restore func.
+// Intended for tests only.
+func SetEnvDirForTests(path string) func() {
+	old := envDir
+	envDir = path
+	return func() {
+		envDir = old
+	}
+}
+
 // ExitCodeError is returned when a command should exit with a specific code.
 type ExitCodeError struct {
 	Code int
@@ -393,6 +413,16 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 	if !locks.NtfyToken {
 		if value, ok := env["NTFY_TOKEN"]; ok {
 			cfg.NtfyToken = value
+		}
+	}
+	if !locks.ApproveURL {
+		if value, ok := env["APPROVE_URL"]; ok {
+			cfg.ApproveURL = value
+		}
+	}
+	if !locks.ApproveToken {
+		if value, ok := env["APPROVE_TOKEN"]; ok {
+			cfg.ApproveToken = value
 		}
 	}
 

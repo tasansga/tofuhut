@@ -130,10 +130,16 @@ func pushGatus(baseURL, token, key string, success bool, message string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return fmt.Errorf("unexpected gatus status: %s (close error: %w)", resp.Status, closeErr)
+		}
 		return fmt.Errorf("unexpected gatus status: %s", resp.Status)
+	}
+
+	if err := resp.Body.Close(); err != nil {
+		return err
 	}
 	return nil
 }
