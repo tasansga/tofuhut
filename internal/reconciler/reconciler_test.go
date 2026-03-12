@@ -1,6 +1,7 @@
 package reconciler
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -198,7 +199,7 @@ func TestRunCommandEmptyEnvPreserved(t *testing.T) {
 
 	setupFakeTofu(t, tmpDir, "#!/bin/sh\nenv > \""+envLog+"\"\nexit 0\n")
 
-	_, err := runCommand(commandOptions{Env: []string{}}, "tofu")
+	_, err := runCommand(context.Background(), commandOptions{Env: []string{}}, "tofu")
 	assert.NoError(t, err)
 
 	data, err := os.ReadFile(envLog)

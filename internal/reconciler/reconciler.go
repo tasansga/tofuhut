@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -75,6 +76,11 @@ func WorkDirPath(workload string) string {
 
 // Run executes the OpenTofu reconciler flow for the given workload name.
 func Run(workload string, cfg Config, envFile string, envFromFile map[string]string) error {
+	return RunWithContext(context.Background(), workload, cfg, envFile, envFromFile)
+}
+
+// RunWithContext executes the OpenTofu reconciler flow for the given workload name.
+func RunWithContext(ctx context.Context, workload string, cfg Config, envFile string, envFromFile map[string]string) error {
 	workdir := filepath.Join(workDirBase, workload)
 	planTextPath := filepath.Join(workdir, fmt.Sprintf("%s-plan.txt", workload))
 	planFilePath := filepath.Join(workdir, "plan.tfplan")
@@ -91,6 +97,13 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 	handler := newGatusHandler(workload, envFile, cfg)
 	var exitCode int
 	defer func() {
+		if ctx.Err() != nil {
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+				"error":    ctx.Err().Error(),
+			}).Info("reconciler canceled; skipping notifications")
+			return
+		}
 		if exitCode != 0 {
 			handler.NotifyFailure(fmt.Sprintf("reconciler failure for %s", workload))
 			return
@@ -107,7 +120,7 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 	}
 
 	logrus.Infof("[tofu] Initializing workload %s", workload)
-	if code, err := runCommand(commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", initArgs...); err != nil {
+	if code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", initArgs...); err != nil {
 		exitCode = 1
 		return &ExitCodeError{Code: 1, Err: err}
 	} else if code != 0 {
@@ -125,7 +138,7 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 			}
 			logrus.Infof("[tofu] Approval found for %s, applying stored plan", workload)
 			applyArgs := []string{"apply", "-input=false", "-auto-approve", planFilePath}
-			if code, err := runCommand(commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
+			if code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
 				exitCode = 1
 				return &ExitCodeError{Code: 1, Err: err}
 			} else if code != 0 {
@@ -149,7 +162,7 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 		planArgs = append(planArgs, "-out", planFilePath)
 	}
 	var planOut bytes.Buffer
-	planCode, err := runCommand(commandOptions{
+	planCode, err := runCommand(ctx, commandOptions{
 		Env:    cmdEnv,
 		Dir:    workdir,
 		Stdout: io.MultiWriter(os.Stdout, &planOut),
@@ -183,7 +196,7 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 		if cfg.Mode == "auto-apply" {
 			logrus.Infof("[tofu] Auto-apply enabled for %s", workload)
 			applyArgs := []string{"apply", "-input=false", "-auto-approve"}
-			if code, err := runCommand(commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
+			if code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
 				exitCode = 1
 				return &ExitCodeError{Code: 1, Err: err}
 			} else if code != 0 {
@@ -205,8 +218,8 @@ type commandOptions struct {
 	Stderr io.Writer
 }
 
-func runCommand(opts commandOptions, name string, args ...string) (int, error) {
-	cmd := exec.Command(name, args...)
+func runCommand(ctx context.Context, opts commandOptions, name string, args ...string) (int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	if opts.Stdout != nil {
 		cmd.Stdout = opts.Stdout
 	} else {
