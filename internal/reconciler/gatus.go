@@ -23,7 +23,7 @@ func newGatusHandler(workload, envFile string, cfg Config) *gatusHandler {
 	return &gatusHandler{
 		workload: workload,
 		envFile:  envFile,
-		group:    "opentofu-reconciler",
+		group:    "tofuhut-reconciler",
 		cfg:      cfg,
 	}
 }

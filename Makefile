@@ -25,4 +25,11 @@ clean:
 	go clean
 	rm -f "$(TOFUHUT_DIR)"
 
-.PHONY: all build lint test tidy clean
+image:
+	docker build \
+		--build-arg VERSION=$${VERSION:-dev} \
+		--build-arg COMMIT=$${COMMIT:-$$(git rev-parse --short HEAD)} \
+		-t tofuhut:$${TAG:-dev} \
+		.
+
+.PHONY: all build lint test tidy clean image

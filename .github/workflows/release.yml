@@ -1,0 +1,100 @@
+name: Release tofuhut
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    name: Build tofuhut
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            os: linux
+          - runner: ubuntu-24.04-arm64
+            arch: arm64
+            os: linux
+          - runner: macos-14
+            arch: arm64
+            os: darwin
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+      - name: Build tofuhut
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/dist
+          go build -trimpath -ldflags "-s -w -X tofuhut/cmd.version=${VERSION} -X tofuhut/cmd.commit=${COMMIT}" -o release/dist/tofuhut .
+          cd release/dist
+          zip -9 "tofuhut_${VERSION}_${{ matrix.os }}_${{ matrix.arch }}.zip" tofuhut
+          rm tofuhut
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tofuhut-${{ matrix.os }}-${{ matrix.arch }}
+          path: release/dist/*.zip
+
+  release:
+    name: Release tofuhut
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release/dist
+          merge-multiple: true
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+      - name: Create checksum files
+        run: |
+          set -euo pipefail
+          cd release/dist
+          sha256sum *.zip > checksums.txt
+      - name: Sign checksum files
+        run: |
+          set -euo pipefail
+          cd release/dist
+          gpg --armor --detach-sign --output checksums.txt.asc checksums.txt
+      - name: Publish release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          files: release/dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -12,6 +12,7 @@ import (
 var rootCmd = &cobra.Command{
 	Use:           "tofuhut",
 	Short:         "Tofuhut OpenTofu reconciler",
+	Version:       buildVersion(),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -64,6 +65,7 @@ func init() {
 	rootCmd.PersistentFlags().String("mode", "", "Run mode: plan or apply (env MODE)")
 	rootCmd.PersistentFlags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
 	rootCmd.PersistentFlags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
 	rootCmd.AddCommand(workloadCmd)
 }
