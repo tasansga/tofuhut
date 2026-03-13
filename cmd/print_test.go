@@ -13,6 +13,7 @@ func TestPrintEmbedded(t *testing.T) {
 		name string
 		file string
 	}{
+		{name: "server-systemd-service", file: "tofuhut-server.service"},
 		{name: "systemd-service", file: "tofuhut-workload@.service"},
 		{name: "systemd-timer", file: "tofuhut-workload@.timer"},
 		{name: "workload-env", file: "tofuhut-workload.env"},

@@ -18,6 +18,11 @@ import (
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
+	Short: "Manage the approval and reconciliation server",
+}
+
+var serverRunCmd = &cobra.Command{
+	Use:   "run",
 	Short: "Run the approval and reconciliation server",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		listen, err := cmd.Flags().GetString("listen")
@@ -40,8 +45,14 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		rescanInterval, err := cmd.Flags().GetDuration("scheduler-rescan-interval")
+		if err != nil {
+			return err
+		}
 
-		handler := newApproveHandler(resolvedConfig, resolvedConfigLocks)
+		cfg := reconciler.Config{}
+		locks := reconciler.ConfigLocks{}
+		handler := newApproveHandler(cfg, locks)
 		server := &http.Server{
 			Addr:              listen,
 			Handler:           handler,
@@ -51,6 +62,10 @@ var serverCmd = &cobra.Command{
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 
+		hupCh := make(chan os.Signal, 1)
+		signal.Notify(hupCh, syscall.SIGHUP)
+		defer signal.Stop(hupCh)
+
 		errCh := make(chan error, 1)
 		go func() {
 			logrus.Infof("server listening on %s", listen)
@@ -58,17 +73,59 @@ var serverCmd = &cobra.Command{
 		}()
 
 		var sched *scheduler.Scheduler
-		if enableScheduler {
-			specs, err := reconciler.LoadWorkloadSpecs(defaultInterval)
-			if err != nil {
-				return err
+		var schedCancel context.CancelFunc
+		startScheduler := func(specs []reconciler.WorkloadSpec) {
+			if schedCancel != nil {
+				schedCancel()
 			}
-			runner := reconciler.NewDefaultRunner(resolvedConfig, resolvedConfigLocks)
+			if sched != nil {
+				sched.Wait()
+			}
+			if len(specs) == 0 {
+				sched = nil
+				schedCancel = nil
+				return
+			}
+			childCtx, childCancel := context.WithCancel(ctx)
+			schedCancel = childCancel
+			runner := reconciler.NewDefaultRunner(cfg, locks)
 			sched = scheduler.New(runner, toSchedulerSpecs(specs), scheduler.Options{
 				Jitter:        jitter,
 				MaxConcurrent: maxConcurrent,
 			})
-			sched.Start(ctx)
+			sched.Start(childCtx)
+		}
+
+		if enableScheduler {
+			specs, err := loadValidWorkloads(defaultInterval, cfg, locks)
+			if err != nil {
+				return err
+			}
+			startScheduler(specs)
+		}
+
+		if enableScheduler && rescanInterval > 0 {
+			go func() {
+				ticker := time.NewTicker(rescanInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-hupCh:
+						logrus.Info("reload requested; rescanning workloads")
+					case <-ticker.C:
+						logrus.Info("rescan interval reached; rescanning workloads")
+					}
+
+					specs, err := loadValidWorkloads(defaultInterval, cfg, locks)
+					if err != nil {
+						logrus.WithError(err).Warn("failed to rescan workloads")
+						continue
+					}
+					startScheduler(specs)
+				}
+			}()
 		}
 
 		select {
@@ -92,11 +149,13 @@ var serverCmd = &cobra.Command{
 }
 
 func init() {
-	serverCmd.Flags().String("listen", ":8080", "Listen address for server")
-	serverCmd.Flags().Bool("enable-scheduler", false, "Enable periodic workload reconciliation")
-	serverCmd.Flags().Duration("scheduler-default-interval", 0, "Default reconciliation interval (per workload override via RECONCILE_INTERVAL)")
-	serverCmd.Flags().Duration("scheduler-jitter", 0, "Add up to this much jitter to each interval")
-	serverCmd.Flags().Int("scheduler-max-concurrent", 2, "Maximum concurrent reconciliations (0 = unlimited)")
+	serverRunCmd.Flags().String("listen", ":8080", "Listen address for server")
+	serverRunCmd.Flags().Bool("enable-scheduler", false, "Enable periodic workload reconciliation")
+	serverRunCmd.Flags().Duration("scheduler-default-interval", 0, "Default reconciliation interval (per workload override via RECONCILE_INTERVAL)")
+	serverRunCmd.Flags().Duration("scheduler-jitter", 0, "Add up to this much jitter to each interval")
+	serverRunCmd.Flags().Int("scheduler-max-concurrent", 2, "Maximum concurrent reconciliations (0 = unlimited)")
+	serverRunCmd.Flags().Duration("scheduler-rescan-interval", 5*time.Minute, "Rescan workloads on this interval (0 = disable)")
+	serverCmd.AddCommand(serverRunCmd)
 	rootCmd.AddCommand(serverCmd)
 }
 
@@ -246,4 +305,44 @@ func toSchedulerSpecs(specs []reconciler.WorkloadSpec) []scheduler.WorkloadSpec 
 		})
 	}
 	return out
+}
+
+func loadValidWorkloads(defaultInterval time.Duration, cfg reconciler.Config, locks reconciler.ConfigLocks) ([]reconciler.WorkloadSpec, error) {
+	specs, err := reconciler.LoadWorkloadSpecs(defaultInterval)
+	if err != nil {
+		return nil, err
+	}
+
+	valid, problems := filterValidWorkloads(specs, cfg, locks)
+	for _, problem := range problems {
+		logrus.Warn(problem)
+	}
+	return valid, nil
+}
+
+func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config, locks reconciler.ConfigLocks) ([]reconciler.WorkloadSpec, []string) {
+	var problems []string
+	valid := make([]reconciler.WorkloadSpec, 0, len(specs))
+	for _, spec := range specs {
+		if !spec.Enabled || spec.Interval <= 0 {
+			continue
+		}
+		envFile := reconciler.EnvFilePath(spec.Name)
+		envFromFile, err := reconciler.LoadEnvFile(envFile)
+		if err != nil {
+			problems = append(problems, spec.Name+": "+err.Error())
+			continue
+		}
+		merged, err := reconciler.MergeConfig(cfg, locks, envFromFile)
+		if err != nil {
+			problems = append(problems, spec.Name+": "+err.Error())
+			continue
+		}
+		if merged.Mode == "apply" && merged.ApproveToken == "" {
+			problems = append(problems, spec.Name+": MODE=apply requires APPROVE_TOKEN to be set")
+			continue
+		}
+		valid = append(valid, spec)
+	}
+	return valid, problems
 }

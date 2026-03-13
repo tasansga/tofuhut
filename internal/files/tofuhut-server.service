@@ -1,0 +1,15 @@
+[Unit]
+Description=Tofuhut server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tofuhut server run
+Restart=on-failure
+RestartSec=5s
+User=tofuhut
+Group=tofuhut
+
+[Install]
+WantedBy=multi-user.target

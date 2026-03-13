@@ -3,7 +3,6 @@ package cmd
 import (
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"tofuhut/internal/reconciler"
@@ -15,18 +14,6 @@ var rootCmd = &cobra.Command{
 	Version:       buildVersion(),
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if isPrintCommand(cmd) {
-			return nil
-		}
-		cfg, locks, err := resolveConfig(cmd)
-		if err != nil {
-			return err
-		}
-		resolvedConfig = cfg
-		resolvedConfigLocks = locks
-		return nil
-	},
 }
 
 // Execute runs the root command.
@@ -55,27 +42,9 @@ func (e *ExitCodeError) Unwrap() error {
 }
 
 func init() {
-	rootCmd.PersistentFlags().String("gatus-cli-url", "", "Gatus CLI URL (env GATUS_CLI_URL)")
-	rootCmd.PersistentFlags().String("gatus-cli-token", "", "Gatus CLI token (env GATUS_CLI_TOKEN)")
-	rootCmd.PersistentFlags().String("ntfy-url", "", "ntfy base URL (env NTFY_URL)")
-	rootCmd.PersistentFlags().String("ntfy-topic", "", "ntfy topic (env NTFY_TOPIC)")
-	rootCmd.PersistentFlags().String("ntfy-token", "", "ntfy access token (env NTFY_TOKEN)")
-	rootCmd.PersistentFlags().String("approve-url", "", "Approval webhook URL for ntfy action (env APPROVE_URL)")
-	rootCmd.PersistentFlags().String("approve-token", "", "Approval webhook token (env APPROVE_TOKEN)")
-	rootCmd.PersistentFlags().String("mode", "", "Run mode: plan or apply (env MODE)")
-	rootCmd.PersistentFlags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
-	rootCmd.PersistentFlags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
 	rootCmd.AddCommand(workloadCmd)
-}
-
-var resolvedConfig reconciler.Config
-var resolvedConfigLocks reconciler.ConfigLocks
-
-func isPrintCommand(cmd *cobra.Command) bool {
-	path := cmd.CommandPath()
-	return path == "tofuhut print" || strings.HasPrefix(path, "tofuhut print ")
 }
 
 func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLocks, error) {

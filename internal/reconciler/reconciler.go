@@ -89,6 +89,9 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 	if _, err := os.Stat(workdir); err != nil {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload directory %s not found", workdir)}
 	}
+	if cfg.Mode == "apply" && cfg.ApproveToken == "" {
+		return &ExitCodeError{Code: 2, Err: fmt.Errorf("MODE=apply requires APPROVE_TOKEN to be set for workload %s", workload)}
+	}
 
 	cmdEnv := mergeEnv(filterEnv(os.Environ()), envFromFile)
 	cmdEnv = setDefaultEnvValue(cmdEnv, "TF_IN_AUTOMATION", "1")
