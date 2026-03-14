@@ -15,11 +15,11 @@ import (
 )
 
 type ntfyConfig struct {
-	BaseURL      string
-	Topic        string
-	Token        string
-	ApproveURL   string
-	ApproveToken string
+	BaseURL       string
+	Topic         string
+	Token         string
+	ApproveURL    string
+	WorkloadToken string
 }
 
 func notifyNtfy(cfg Config, workload, planTextPath string) {
@@ -28,11 +28,11 @@ func notifyNtfy(cfg Config, workload, planTextPath string) {
 	}
 
 	ncfg := ntfyConfig{
-		BaseURL:      cfg.NtfyURL,
-		Topic:        cfg.NtfyTopic,
-		Token:        cfg.NtfyToken,
-		ApproveURL:   cfg.ApproveURL,
-		ApproveToken: cfg.ApproveToken,
+		BaseURL:       cfg.NtfyURL,
+		Topic:         cfg.NtfyTopic,
+		Token:         cfg.NtfyToken,
+		ApproveURL:    cfg.ApproveURL,
+		WorkloadToken: cfg.WorkloadToken,
 	}
 	if err := postNtfy(ncfg, workload, planTextPath); err != nil {
 		logrus.Warnf("ntfy notification failed: %v", err)
@@ -78,7 +78,7 @@ func postNtfy(cfg ntfyConfig, workload, planTextPath string) error {
 		req.Header.Set("Authorization", "Bearer "+cfg.Token)
 	}
 	if cfg.ApproveURL != "" {
-		if action := buildNtfyApproveAction(cfg.ApproveURL, cfg.ApproveToken, workload); action != "" {
+		if action := buildNtfyApproveAction(cfg.ApproveURL, cfg.WorkloadToken, workload); action != "" {
 			req.Header.Set("Actions", action)
 		}
 	}

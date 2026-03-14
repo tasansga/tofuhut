@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +17,8 @@ import (
 	"tofuhut/internal/reconciler"
 	"tofuhut/internal/reconciler/scheduler"
 )
+
+var errWorkloadLocked = errors.New("workload already running")
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
@@ -50,17 +54,18 @@ var serverRunCmd = &cobra.Command{
 			return err
 		}
 
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+
 		cfg := reconciler.Config{}
 		locks := reconciler.ConfigLocks{}
-		handler := newApproveHandler(cfg, locks)
+		workloadLocks := newWorkloadLockSet()
+		handler := newServerHandler(cfg, locks, reconciler.NewDefaultRunner(cfg, locks), ctx, workloadLocks)
 		server := &http.Server{
 			Addr:              listen,
 			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 		}
-
-		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
 
 		hupCh := make(chan os.Signal, 1)
 		signal.Notify(hupCh, syscall.SIGHUP)
@@ -72,9 +77,12 @@ var serverRunCmd = &cobra.Command{
 			errCh <- server.ListenAndServe()
 		}()
 
+		var schedMu sync.Mutex
 		var sched *scheduler.Scheduler
 		var schedCancel context.CancelFunc
 		startScheduler := func(specs []reconciler.WorkloadSpec) {
+			schedMu.Lock()
+			defer schedMu.Unlock()
 			if schedCancel != nil {
 				schedCancel()
 			}
@@ -88,8 +96,8 @@ var serverRunCmd = &cobra.Command{
 			}
 			childCtx, childCancel := context.WithCancel(ctx)
 			schedCancel = childCancel
-			runner := reconciler.NewDefaultRunner(cfg, locks)
-			sched = scheduler.New(runner, toSchedulerSpecs(specs), scheduler.Options{
+			lockedRunner := newLockedRunner(reconciler.NewDefaultRunner(cfg, locks), workloadLocks)
+			sched = scheduler.New(lockedRunner, toSchedulerSpecs(specs), scheduler.Options{
 				Jitter:        jitter,
 				MaxConcurrent: maxConcurrent,
 			})
@@ -141,8 +149,11 @@ var serverRunCmd = &cobra.Command{
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logrus.WithError(err).Warn("server shutdown failed")
 		}
-		if sched != nil {
-			sched.Wait()
+		schedMu.Lock()
+		currentSched := sched
+		schedMu.Unlock()
+		if currentSched != nil {
+			currentSched.Wait()
 		}
 		return nil
 	},
@@ -159,36 +170,59 @@ func init() {
 	rootCmd.AddCommand(serverCmd)
 }
 
-type approveHandler struct {
-	cfg   reconciler.Config
-	locks reconciler.ConfigLocks
+type serverHandler struct {
+	cfg           reconciler.Config
+	locks         reconciler.ConfigLocks
+	runner        reconciler.Runner
+	ctx           context.Context
+	workloadLocks *workloadLockSet
 }
 
-func newApproveHandler(cfg reconciler.Config, locks reconciler.ConfigLocks) http.Handler {
-	return &approveHandler{cfg: cfg, locks: locks}
+func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, runner reconciler.Runner, ctx context.Context, workloadLocks *workloadLockSet) http.Handler {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if workloadLocks == nil {
+		workloadLocks = newWorkloadLockSet()
+	}
+	return &serverHandler{
+		cfg:           cfg,
+		locks:         locks,
+		runner:        runner,
+		ctx:           ctx,
+		workloadLocks: workloadLocks,
+	}
 }
 
-func (h *approveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *serverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/approve/") {
+		h.handleApprove(w, r, start)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/reconcile/") {
+		h.handleReconcile(w, r, start)
+		return
+	}
+	logrus.WithFields(logrus.Fields{
+		"method": r.Method,
+		"path":   r.URL.Path,
+	}).Warn("request rejected: not found")
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, start time.Time) {
 	if r.Method != http.MethodPost {
 		logrus.WithFields(logrus.Fields{
 			"method": r.Method,
 			"path":   r.URL.Path,
 		}).Warn("approve request rejected: method not allowed")
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	if !strings.HasPrefix(r.URL.Path, "/approve/") {
-		logrus.WithFields(logrus.Fields{
-			"method": r.Method,
-			"path":   r.URL.Path,
-		}).Warn("approve request rejected: not found")
-		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
@@ -208,7 +242,7 @@ func (h *approveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	effectiveToken, err := tokenFromWorkloadEnv(workload, h.cfg, h.locks)
+	effectiveToken, err := workloadTokenFromEnv(workload, h.cfg, h.locks)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"workload": workload,
@@ -276,13 +310,157 @@ func (h *approveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, start time.Time) {
+	if r.Method != http.MethodPost {
+		logrus.WithFields(logrus.Fields{
+			"method": r.Method,
+			"path":   r.URL.Path,
+		}).Warn("reconcile request rejected: method not allowed")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if h.runner == nil {
+		logrus.Error("reconcile request failed: no runner configured")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	workload := strings.TrimPrefix(r.URL.Path, "/reconcile/")
+	if workload == "" || strings.Contains(workload, "/") {
+		logrus.WithFields(logrus.Fields{
+			"path": r.URL.Path,
+		}).Warn("reconcile request rejected: invalid workload path")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err := validateWorkloadName(workload); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"workload": workload,
+		}).Warn("reconcile request rejected: invalid workload name")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	effectiveToken, err := workloadTokenFromEnv(workload, h.cfg, h.locks)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"workload": workload,
+		}).Error("reconcile request failed: env token lookup error")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if effectiveToken != "" {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer "+effectiveToken {
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+			}).Warn("reconcile request rejected: unauthorized")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}
+
+	workdir := reconciler.WorkDirPath(workload)
+	if _, err := os.Stat(workdir); err != nil {
+		if os.IsNotExist(err) {
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+			}).Warn("reconcile request rejected: workload directory not found")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		logrus.WithFields(logrus.Fields{
+			"workload": workload,
+		}).Error("reconcile request failed: workload directory stat error")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if !h.workloadLocks.TryLock(workload) {
+		logrus.WithFields(logrus.Fields{
+			"workload": workload,
+		}).Warn("reconcile request rejected: workload already running")
+		w.WriteHeader(http.StatusLocked)
+		return
+	}
+
+	go func() {
+		runStart := time.Now()
+		err := h.runner.Run(h.ctx, workload)
+		h.workloadLocks.Unlock(workload)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+				"latency":  time.Since(runStart).String(),
+				"error":    err.Error(),
+			}).Warn("manual reconcile failed")
+			return
+		}
+		logrus.WithFields(logrus.Fields{
+			"workload": workload,
+			"latency":  time.Since(runStart).String(),
+		}).Info("manual reconcile completed")
+	}()
+
+	logrus.WithFields(logrus.Fields{
+		"workload": workload,
+		"latency":  time.Since(start).String(),
+	}).Info("manual reconcile started")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte("accepted"))
+}
+
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 }
 
-func tokenFromWorkloadEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks) (string, error) {
+type workloadLockSet struct {
+	mu      sync.Mutex
+	running map[string]bool
+}
+
+func newWorkloadLockSet() *workloadLockSet {
+	return &workloadLockSet{running: make(map[string]bool)}
+}
+
+func (s *workloadLockSet) TryLock(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running[name] {
+		return false
+	}
+	s.running[name] = true
+	return true
+}
+
+func (s *workloadLockSet) Unlock(name string) {
+	s.mu.Lock()
+	delete(s.running, name)
+	s.mu.Unlock()
+}
+
+type lockedRunner struct {
+	inner reconciler.Runner
+	locks *workloadLockSet
+}
+
+func newLockedRunner(inner reconciler.Runner, locks *workloadLockSet) reconciler.Runner {
+	if locks == nil {
+		locks = newWorkloadLockSet()
+	}
+	return &lockedRunner{inner: inner, locks: locks}
+}
+
+func (r *lockedRunner) Run(ctx context.Context, workload string) error {
+	if !r.locks.TryLock(workload) {
+		return errWorkloadLocked
+	}
+	defer r.locks.Unlock(workload)
+	return r.inner.Run(ctx, workload)
+}
+
+func workloadTokenFromEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks) (string, error) {
 	envFile := reconciler.EnvFilePath(workload)
 	envFromFile, err := reconciler.LoadEnvFile(envFile)
 	if err != nil {
@@ -292,7 +470,7 @@ func tokenFromWorkloadEnv(workload string, cfg reconciler.Config, locks reconcil
 	if err != nil {
 		return "", err
 	}
-	return merged.ApproveToken, nil
+	return merged.WorkloadToken, nil
 }
 
 func toSchedulerSpecs(specs []reconciler.WorkloadSpec) []scheduler.WorkloadSpec {
@@ -338,8 +516,8 @@ func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config
 			problems = append(problems, spec.Name+": "+err.Error())
 			continue
 		}
-		if merged.Mode == "apply" && merged.ApproveToken == "" {
-			problems = append(problems, spec.Name+": MODE=apply requires APPROVE_TOKEN to be set")
+		if merged.Mode == "apply" && merged.WorkloadToken == "" {
+			problems = append(problems, spec.Name+": MODE=apply requires WORKLOAD_TOKEN to be set")
 			continue
 		}
 		valid = append(valid, spec)

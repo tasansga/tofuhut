@@ -23,7 +23,7 @@ Run approval webhook server:
 - `RECONFIGURE=true` adds `-reconfigure` to `tofu init`.
 - `GATUS_CLI_URL` and `GATUS_CLI_TOKEN` enable Gatus reporting. Alternatively define a function `gatus_cli_token_for_name` in the env file to supply a token for the workload name.
 - `NTFY_URL`, `NTFY_TOPIC`, and `NTFY_TOKEN` enable ntfy notifications when approval is required.
-- `APPROVE_URL` and `APPROVE_TOKEN` configure the approval webhook used by ntfy action buttons.
+- `APPROVE_URL` and `WORKLOAD_TOKEN` configure the approval webhook used by ntfy action buttons.
 
 **Environment Propagation**
 Tofuhut passes a restricted allowlist of host environment variables to `tofu`, then merges in variables from the workload env file. The allowlist is intentionally minimal (PATH, locale, proxy, certs, temp dirs, and basic user/home fields). Add provider credentials (e.g. AWS_) to the workload env file explicitly.

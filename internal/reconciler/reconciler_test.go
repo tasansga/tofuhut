@@ -84,7 +84,7 @@ func TestRunApplyWritesPlanAndWaitsForApproval(t *testing.T) {
 	tmpBin := t.TempDir()
 	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then echo \"planned\"; touch \"__TOFUHUT_PLAN_FILE__\"; exit 2; fi\nexit 0\n")
 
-	cfg := Config{Mode: "apply", ApproveToken: "token"}
+	cfg := Config{Mode: "apply", WorkloadToken: "token"}
 	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
 	assert.NoError(t, err)
 	assert.FileExists(t, planTextPath)
@@ -113,7 +113,7 @@ func TestRunApplyUsesApprovedPlan(t *testing.T) {
 	tmpBin := t.TempDir()
 	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
 
-	cfg := Config{Mode: "apply", ApproveToken: "token"}
+	cfg := Config{Mode: "apply", WorkloadToken: "token"}
 	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
 	assert.NoError(t, err)
 
@@ -140,7 +140,7 @@ func TestRunApplyStaleApprovalRemoved(t *testing.T) {
 	tmpBin := t.TempDir()
 	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
 
-	cfg := Config{Mode: "apply", ApproveToken: "token"}
+	cfg := Config{Mode: "apply", WorkloadToken: "token"}
 	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
 	assert.NoError(t, err)
 	assert.NoFileExists(t, approvePath)
@@ -182,7 +182,7 @@ func TestRunApplyNoChangesCleansPlanArtifacts(t *testing.T) {
 	tmpBin := t.TempDir()
 	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then touch \"__TOFUHUT_PLAN_FILE__\"; exit 0; fi\nexit 0\n")
 
-	cfg := Config{Mode: "apply", ApproveToken: "token"}
+	cfg := Config{Mode: "apply", WorkloadToken: "token"}
 	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
 	assert.NoError(t, err)
 	assert.NoFileExists(t, planPath)

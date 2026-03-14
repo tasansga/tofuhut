@@ -89,8 +89,8 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 	if _, err := os.Stat(workdir); err != nil {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload directory %s not found", workdir)}
 	}
-	if cfg.Mode == "apply" && cfg.ApproveToken == "" {
-		return &ExitCodeError{Code: 2, Err: fmt.Errorf("MODE=apply requires APPROVE_TOKEN to be set for workload %s", workload)}
+	if cfg.Mode == "apply" && cfg.WorkloadToken == "" {
+		return &ExitCodeError{Code: 2, Err: fmt.Errorf("MODE=apply requires WORKLOAD_TOKEN to be set for workload %s", workload)}
 	}
 
 	cmdEnv := mergeEnv(filterEnv(os.Environ()), envFromFile)
@@ -436,9 +436,9 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 			cfg.ApproveURL = value
 		}
 	}
-	if !locks.ApproveToken {
-		if value, ok := env["APPROVE_TOKEN"]; ok {
-			cfg.ApproveToken = value
+	if !locks.WorkloadToken {
+		if value, ok := env["WORKLOAD_TOKEN"]; ok {
+			cfg.WorkloadToken = value
 		}
 	}
 

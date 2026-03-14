@@ -57,31 +57,31 @@ func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLock
 	ntfyTopic, ntfyTopicLocked := resolveString(cmd, "ntfy-topic", "NTFY_TOPIC")
 	ntfyToken, ntfyTokenLocked := resolveString(cmd, "ntfy-token", "NTFY_TOKEN")
 	approveURL, approveURLLocked := resolveString(cmd, "approve-url", "APPROVE_URL")
-	approveToken, approveTokenLocked := resolveString(cmd, "approve-token", "APPROVE_TOKEN")
+	workloadToken, workloadTokenLocked := resolveString(cmd, "workload-token", "WORKLOAD_TOKEN")
 
 	cfg := reconciler.Config{
-		Mode:         mode,
-		Upgrade:      upgrade,
-		Reconfigure:  reconfigure,
-		GatusURL:     gatusURL,
-		GatusToken:   gatusToken,
-		NtfyURL:      ntfyURL,
-		NtfyTopic:    ntfyTopic,
-		NtfyToken:    ntfyToken,
-		ApproveURL:   approveURL,
-		ApproveToken: approveToken,
+		Mode:          mode,
+		Upgrade:       upgrade,
+		Reconfigure:   reconfigure,
+		GatusURL:      gatusURL,
+		GatusToken:    gatusToken,
+		NtfyURL:       ntfyURL,
+		NtfyTopic:     ntfyTopic,
+		NtfyToken:     ntfyToken,
+		ApproveURL:    approveURL,
+		WorkloadToken: workloadToken,
 	}
 	locks := reconciler.ConfigLocks{
-		Mode:         modeLocked,
-		Upgrade:      upgradeLocked,
-		Reconfigure:  reconfigureLocked,
-		GatusURL:     gatusURLLocked,
-		GatusToken:   gatusTokenLocked,
-		NtfyURL:      ntfyURLLocked,
-		NtfyTopic:    ntfyTopicLocked,
-		NtfyToken:    ntfyTokenLocked,
-		ApproveURL:   approveURLLocked,
-		ApproveToken: approveTokenLocked,
+		Mode:          modeLocked,
+		Upgrade:       upgradeLocked,
+		Reconfigure:   reconfigureLocked,
+		GatusURL:      gatusURLLocked,
+		GatusToken:    gatusTokenLocked,
+		NtfyURL:       ntfyURLLocked,
+		NtfyTopic:     ntfyTopicLocked,
+		NtfyToken:     ntfyTokenLocked,
+		ApproveURL:    approveURLLocked,
+		WorkloadToken: workloadTokenLocked,
 	}
 	return cfg, locks, nil
 }

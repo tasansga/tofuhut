@@ -72,7 +72,7 @@ func init() {
 	workloadRunCmd.Flags().String("ntfy-topic", "", "ntfy topic (env NTFY_TOPIC)")
 	workloadRunCmd.Flags().String("ntfy-token", "", "ntfy access token (env NTFY_TOKEN)")
 	workloadRunCmd.Flags().String("approve-url", "", "Approval webhook URL for ntfy action (env APPROVE_URL)")
-	workloadRunCmd.Flags().String("approve-token", "", "Approval webhook token (env APPROVE_TOKEN)")
+	workloadRunCmd.Flags().String("workload-token", "", "Workload token for approval and reconcile (env WORKLOAD_TOKEN)")
 	workloadRunCmd.Flags().String("mode", "", "Run mode: plan or apply (env MODE)")
 	workloadRunCmd.Flags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
 	workloadRunCmd.Flags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
