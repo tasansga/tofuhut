@@ -14,8 +14,9 @@ import (
 )
 
 type fakeRunner struct {
-	started chan struct{}
-	block   chan struct{}
+	started  chan struct{}
+	block    chan struct{}
+	workload string
 }
 
 func newFakeRunner(block bool) *fakeRunner {
@@ -29,6 +30,7 @@ func newFakeRunner(block bool) *fakeRunner {
 }
 
 func (r *fakeRunner) Run(ctx context.Context, workload string) error {
+	r.workload = workload
 	select {
 	case r.started <- struct{}{}:
 	default:
@@ -56,7 +58,7 @@ func TestApproveServerRejectsMissingPlan(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 	req.Header.Set("Authorization", "Bearer token")
 
-	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
@@ -71,7 +73,9 @@ func TestReconcileStartsWorkload(t *testing.T) {
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 
 	runner := newFakeRunner(false)
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, runner, context.Background(), nil)
+	dispatcher := newDispatcher(runner, context.Background())
+	t.Cleanup(dispatcher.Stop)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, dispatcher)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/reconcile/demo", nil)
@@ -83,6 +87,7 @@ func TestReconcileStartsWorkload(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("expected runner to start")
 	}
+	assert.Equal(t, "demo", runner.workload)
 }
 
 func TestReconcileRejectsUnauthorized(t *testing.T) {
@@ -94,7 +99,9 @@ func TestReconcileRejectsUnauthorized(t *testing.T) {
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 
 	runner := newFakeRunner(false)
-	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, runner, context.Background(), nil)
+	dispatcher := newDispatcher(runner, context.Background())
+	t.Cleanup(dispatcher.Stop)
+	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, dispatcher)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/reconcile/demo", nil)
@@ -112,7 +119,9 @@ func TestReconcileReturnsLockedWhenRunning(t *testing.T) {
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 
 	runner := newFakeRunner(true)
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, runner, context.Background(), nil)
+	dispatcher := newDispatcher(runner, context.Background())
+	t.Cleanup(dispatcher.Stop)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, dispatcher)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/reconcile/demo", nil)
@@ -126,6 +135,7 @@ func TestReconcileReturnsLockedWhenRunning(t *testing.T) {
 	assert.Equal(t, http.StatusLocked, rec.Code)
 
 	close(runner.block)
+	assert.True(t, dispatcher.Wait("demo", 500*time.Millisecond))
 }
 
 func TestApproveServerWritesApproveFile(t *testing.T) {
@@ -141,7 +151,7 @@ func TestApproveServerWritesApproveFile(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 	req.Header.Set("Authorization", "Bearer token")
 
-	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 
 	approvePath := filepath.Join(workdir, "approve")
@@ -161,7 +171,7 @@ func TestApproveServerUnauthorized(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 
-	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -179,7 +189,7 @@ func TestApproveServerAllowsWithoutToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -193,7 +203,7 @@ func TestApproveServerRejectsInvalidWorkload(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/../bad", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -207,7 +217,7 @@ func TestApproveServerRejectsDotWorkloads(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/..", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -231,7 +241,7 @@ func TestApproveServerUsesTokenFromEnvFile(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, nil, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
@@ -263,7 +273,7 @@ func TestApproveServerUsesLockedTokenOverEnv(t *testing.T) {
 
 	cfg := reconciler.Config{WorkloadToken: "locked"}
 	locks := reconciler.ConfigLocks{WorkloadToken: true}
-	h := newServerHandler(cfg, locks, nil, nil, nil)
+	h := newServerHandler(cfg, locks, nil)
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 

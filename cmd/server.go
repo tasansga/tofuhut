@@ -19,6 +19,7 @@ import (
 )
 
 var errWorkloadLocked = errors.New("workload already running")
+var errWorkloadDisabled = errors.New("workload disabled")
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
@@ -59,8 +60,9 @@ var serverRunCmd = &cobra.Command{
 
 		cfg := reconciler.Config{}
 		locks := reconciler.ConfigLocks{}
-		workloadLocks := newWorkloadLockSet()
-		handler := newServerHandler(cfg, locks, reconciler.NewDefaultRunner(cfg, locks), ctx, workloadLocks)
+		dispatcher := newDispatcher(reconciler.NewDefaultRunner(cfg, locks), ctx)
+		handler := newServerHandler(cfg, locks, dispatcher)
+		handler.(*serverHandler).ctx = ctx
 		server := &http.Server{
 			Addr:              listen,
 			Handler:           handler,
@@ -96,8 +98,7 @@ var serverRunCmd = &cobra.Command{
 			}
 			childCtx, childCancel := context.WithCancel(ctx)
 			schedCancel = childCancel
-			lockedRunner := newLockedRunner(reconciler.NewDefaultRunner(cfg, locks), workloadLocks)
-			sched = scheduler.New(lockedRunner, toSchedulerSpecs(specs), scheduler.Options{
+			sched = scheduler.New(newTriggerRunner(dispatcher), toSchedulerSpecs(specs), scheduler.Options{
 				Jitter:        jitter,
 				MaxConcurrent: maxConcurrent,
 			})
@@ -109,6 +110,7 @@ var serverRunCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
+			dispatcher.DisableExcept(workloadsSet(specs))
 			startScheduler(specs)
 		}
 
@@ -131,6 +133,7 @@ var serverRunCmd = &cobra.Command{
 						logrus.WithError(err).Warn("failed to rescan workloads")
 						continue
 					}
+					dispatcher.DisableExcept(workloadsSet(specs))
 					startScheduler(specs)
 				}
 			}()
@@ -149,6 +152,7 @@ var serverRunCmd = &cobra.Command{
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logrus.WithError(err).Warn("server shutdown failed")
 		}
+		dispatcher.Stop()
 		schedMu.Lock()
 		currentSched := sched
 		schedMu.Unlock()
@@ -171,26 +175,18 @@ func init() {
 }
 
 type serverHandler struct {
-	cfg           reconciler.Config
-	locks         reconciler.ConfigLocks
-	runner        reconciler.Runner
-	ctx           context.Context
-	workloadLocks *workloadLockSet
+	cfg        reconciler.Config
+	locks      reconciler.ConfigLocks
+	dispatcher *dispatcher
+	ctx        context.Context
 }
 
-func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, runner reconciler.Runner, ctx context.Context, workloadLocks *workloadLockSet) http.Handler {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if workloadLocks == nil {
-		workloadLocks = newWorkloadLockSet()
-	}
+func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, dispatcher *dispatcher) http.Handler {
 	return &serverHandler{
-		cfg:           cfg,
-		locks:         locks,
-		runner:        runner,
-		ctx:           ctx,
-		workloadLocks: workloadLocks,
+		cfg:        cfg,
+		locks:      locks,
+		dispatcher: dispatcher,
+		ctx:        context.Background(),
 	}
 }
 
@@ -319,8 +315,8 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if h.runner == nil {
-		logrus.Error("reconcile request failed: no runner configured")
+	if h.dispatcher == nil {
+		logrus.Error("reconcile request failed: no dispatcher configured")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -375,36 +371,24 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if !h.workloadLocks.TryLock(workload) {
+	if err := h.dispatcher.Trigger(h.ctx, workload); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"workload": workload,
-		}).Warn("reconcile request rejected: workload already running")
-		w.WriteHeader(http.StatusLocked)
+			"error":    err.Error(),
+		}).Warn("reconcile request rejected")
+		switch err {
+		case errWorkloadDisabled:
+			w.WriteHeader(http.StatusConflict)
+		default:
+			w.WriteHeader(http.StatusLocked)
+		}
 		return
 	}
-
-	go func() {
-		runStart := time.Now()
-		err := h.runner.Run(h.ctx, workload)
-		h.workloadLocks.Unlock(workload)
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"workload": workload,
-				"latency":  time.Since(runStart).String(),
-				"error":    err.Error(),
-			}).Warn("manual reconcile failed")
-			return
-		}
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
-			"latency":  time.Since(runStart).String(),
-		}).Info("manual reconcile completed")
-	}()
 
 	logrus.WithFields(logrus.Fields{
 		"workload": workload,
 		"latency":  time.Since(start).String(),
-	}).Info("manual reconcile started")
+	}).Info("manual reconcile queued")
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("accepted"))
 }
@@ -415,49 +399,237 @@ func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 }
 
-type workloadLockSet struct {
-	mu      sync.Mutex
-	running map[string]bool
+type dispatcher struct {
+	runner        reconciler.Runner
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	queues        map[string]*workloadQueue
+	enabled       map[string]bool
+	hasEnabledSet bool
+	wg            sync.WaitGroup
 }
 
-func newWorkloadLockSet() *workloadLockSet {
-	return &workloadLockSet{running: make(map[string]bool)}
+func newDispatcher(runner reconciler.Runner, ctx context.Context) *dispatcher {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	return &dispatcher{
+		runner:  runner,
+		ctx:     ctx,
+		cancel:  cancel,
+		queues:  make(map[string]*workloadQueue),
+		enabled: make(map[string]bool),
+	}
 }
 
-func (s *workloadLockSet) TryLock(name string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running[name] {
+func (d *dispatcher) Start() {
+	// no-op: workers start lazily on first trigger
+}
+
+func (d *dispatcher) Stop() {
+	d.cancel()
+	d.wg.Wait()
+}
+
+func (d *dispatcher) Trigger(ctx context.Context, workload string) error {
+	_, _, err := d.triggerWithResult(ctx, workload)
+	return err
+}
+
+func (d *dispatcher) TriggerSync(ctx context.Context, workload string) error {
+	result, _, err := d.triggerWithResult(ctx, workload)
+	if err != nil {
+		return err
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *dispatcher) triggerWithResult(ctx context.Context, workload string) (chan error, chan struct{}, error) {
+	d.mu.Lock()
+	if d.hasEnabledSet {
+		if !d.enabled[workload] {
+			d.mu.Unlock()
+			return nil, nil, errWorkloadDisabled
+		}
+	}
+	queue, ok := d.queues[workload]
+	if !ok {
+		queue = &workloadQueue{
+			ch:     make(chan struct{}, 1),
+			done:   make(chan struct{}),
+			result: make(chan error, 1),
+			open:   true,
+		}
+		d.queues[workload] = queue
+		d.startWorkerLocked(workload, queue)
+	}
+	if queue.disabled {
+		d.mu.Unlock()
+		return nil, nil, errWorkloadDisabled
+	}
+	if queue.inFlight || queue.pending {
+		d.mu.Unlock()
+		return nil, nil, errWorkloadLocked
+	}
+	queue.pending = true
+	if !queue.open {
+		queue.done = make(chan struct{})
+		queue.result = make(chan error, 1)
+		queue.open = true
+	}
+	queue.pendingCtx = ctx
+	done := queue.done
+	result := queue.result
+	d.mu.Unlock()
+
+	select {
+	case queue.ch <- struct{}{}:
+		return result, done, nil
+	default:
+		d.mu.Lock()
+		queue.pending = false
+		if queue.open {
+			close(queue.result)
+			close(queue.done)
+			queue.open = false
+		}
+		d.mu.Unlock()
+		return nil, nil, errWorkloadLocked
+	}
+}
+
+func (d *dispatcher) DisableExcept(keep map[string]struct{}) {
+	d.mu.Lock()
+	d.hasEnabledSet = true
+	d.enabled = make(map[string]bool, len(keep))
+	for name := range keep {
+		d.enabled[name] = true
+	}
+	for name, queue := range d.queues {
+		_, ok := keep[name]
+		queue.disabled = !ok
+	}
+	d.mu.Unlock()
+}
+
+func (d *dispatcher) Wait(workload string, timeout time.Duration) bool {
+	d.mu.Lock()
+	queue, ok := d.queues[workload]
+	d.mu.Unlock()
+	if !ok {
+		return true
+	}
+	d.mu.Lock()
+	if !queue.inFlight && !queue.pending {
+		d.mu.Unlock()
+		return true
+	}
+	done := queue.done
+	open := queue.open
+	d.mu.Unlock()
+	if !open {
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
 		return false
 	}
-	s.running[name] = true
-	return true
 }
 
-func (s *workloadLockSet) Unlock(name string) {
-	s.mu.Lock()
-	delete(s.running, name)
-	s.mu.Unlock()
+func (d *dispatcher) startWorkerLocked(workload string, queue *workloadQueue) {
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		for {
+			select {
+			case <-d.ctx.Done():
+				return
+			case <-queue.ch:
+			}
+			d.mu.Lock()
+			queue.pending = false
+			queue.inFlight = true
+			runCtx := queue.pendingCtx
+			queue.pendingCtx = nil
+			d.mu.Unlock()
+			runStart := time.Now()
+			if runCtx == nil {
+				runCtx = d.ctx
+			}
+			if runCtx.Err() != nil {
+				runErr := runCtx.Err()
+				d.mu.Lock()
+				queue.inFlight = false
+				if queue.open {
+					queue.result <- runErr
+					close(queue.result)
+					close(queue.done)
+					queue.open = false
+				}
+				d.mu.Unlock()
+				continue
+			}
+			err := d.runner.Run(runCtx, workload)
+			d.mu.Lock()
+			queue.inFlight = false
+			if queue.open {
+				queue.result <- err
+				close(queue.result)
+				close(queue.done)
+				queue.open = false
+			}
+			d.mu.Unlock()
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"workload": workload,
+					"latency":  time.Since(runStart).String(),
+					"error":    err.Error(),
+				}).Warn("reconcile failed")
+				continue
+			}
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+				"latency":  time.Since(runStart).String(),
+			}).Info("reconcile completed")
+		}
+	}()
 }
 
-type lockedRunner struct {
-	inner reconciler.Runner
-	locks *workloadLockSet
+type workloadQueue struct {
+	ch         chan struct{}
+	done       chan struct{}
+	result     chan error
+	open       bool
+	pending    bool
+	inFlight   bool
+	disabled   bool
+	pendingCtx context.Context
 }
 
-func newLockedRunner(inner reconciler.Runner, locks *workloadLockSet) reconciler.Runner {
-	if locks == nil {
-		locks = newWorkloadLockSet()
+type triggerRunner struct {
+	dispatcher *dispatcher
+}
+
+func newTriggerRunner(dispatcher *dispatcher) reconciler.Runner {
+	return &triggerRunner{dispatcher: dispatcher}
+}
+
+func (r *triggerRunner) Run(ctx context.Context, workload string) error {
+	if r.dispatcher == nil {
+		return nil
 	}
-	return &lockedRunner{inner: inner, locks: locks}
-}
-
-func (r *lockedRunner) Run(ctx context.Context, workload string) error {
-	if !r.locks.TryLock(workload) {
-		return errWorkloadLocked
-	}
-	defer r.locks.Unlock(workload)
-	return r.inner.Run(ctx, workload)
+	return r.dispatcher.TriggerSync(ctx, workload)
 }
 
 func workloadTokenFromEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks) (string, error) {
@@ -523,4 +695,14 @@ func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config
 		valid = append(valid, spec)
 	}
 	return valid, problems
+}
+
+func workloadsSet(specs []reconciler.WorkloadSpec) map[string]struct{} {
+	set := make(map[string]struct{}, len(specs))
+	for _, spec := range specs {
+		if spec.Enabled && spec.Interval > 0 {
+			set[spec.Name] = struct{}{}
+		}
+	}
+	return set
 }
