@@ -24,6 +24,7 @@ Run approval webhook server:
 - `GATUS_CLI_URL` and `GATUS_CLI_TOKEN` enable Gatus reporting. Alternatively define a function `gatus_cli_token_for_name` in the env file to supply a token for the workload name.
 - `NTFY_URL`, `NTFY_TOPIC`, and `NTFY_TOKEN` enable ntfy notifications when approval is required.
 - `APPROVE_URL` and `WORKLOAD_TOKEN` configure the approval webhook used by ntfy action buttons.
+- `WORKLOAD_TYPE` selects the workload runner: `tofu` or `ansible` (expects `playbook.yml` in the workload directory; `plan` runs `ansible-playbook --check`).
 
 **Environment Propagation**
 Tofuhut passes a restricted allowlist of host environment variables to `tofu`, then merges in variables from the workload env file. The allowlist is intentionally minimal (PATH, locale, proxy, certs, temp dirs, and basic user/home fields). Add provider credentials (e.g. AWS_) to the workload env file explicitly.

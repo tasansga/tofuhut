@@ -85,12 +85,17 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 	planTextPath := filepath.Join(workdir, fmt.Sprintf("%s-plan.txt", workload))
 	planFilePath := filepath.Join(workdir, "plan.tfplan")
 	approvePath := filepath.Join(workdir, "approve")
+	approvePendingPath := approvePath + ".pending"
+	playbookPath := filepath.Join(workdir, "playbook.yml")
 
 	if _, err := os.Stat(workdir); err != nil {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload directory %s not found", workdir)}
 	}
 	if cfg.Mode == "apply" && cfg.WorkloadToken == "" {
 		return &ExitCodeError{Code: 2, Err: fmt.Errorf("MODE=apply requires WORKLOAD_TOKEN to be set for workload %s", workload)}
+	}
+	if err := ensureCommandAvailable(cfg.WorkloadType); err != nil {
+		return err
 	}
 
 	cmdEnv := mergeEnv(filterEnv(os.Environ()), envFromFile)
@@ -113,6 +118,18 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 		}
 		handler.NotifySuccess()
 	}()
+
+	if cfg.WorkloadType == "ansible" {
+		if err := runAnsible(ctx, workload, cfg, approvePath, approvePendingPath, playbookPath, cmdEnv, workdir); err != nil {
+			if exitErr, ok := err.(*ExitCodeError); ok {
+				exitCode = exitErr.Code
+			} else {
+				exitCode = 1
+			}
+			return err
+		}
+		return nil
+	}
 
 	initArgs := []string{"init", "-input=false"}
 	if cfg.Upgrade {
@@ -212,6 +229,77 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 		exitCode = planCode
 		return &ExitCodeError{Code: planCode, Err: fmt.Errorf("tofu plan failed (rc=%d)", planCode)}
 	}
+}
+
+func ensureCommandAvailable(workloadType string) error {
+	switch workloadType {
+	case "ansible":
+		if _, err := exec.LookPath("ansible-playbook"); err != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("ansible-playbook not found in PATH")}
+		}
+	case "tofu":
+		if _, err := exec.LookPath("tofu"); err != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("tofu not found in PATH")}
+		}
+	}
+	return nil
+}
+
+// ValidateRuntime checks that required executables are available for the workload type.
+func ValidateRuntime(cfg Config) error {
+	return ensureCommandAvailable(cfg.WorkloadType)
+}
+
+func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, approvePendingPath, playbookPath string, cmdEnv []string, workdir string) error {
+	if _, err := os.Stat(playbookPath); err != nil {
+		if os.IsNotExist(err) {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("playbook %s not found for workload %s", playbookPath, workload)}
+		}
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("unable to stat playbook %s: %w", playbookPath, err)}
+	}
+
+	if cfg.Mode == "apply" {
+		approveExists := fileExists(approvePath)
+		pendingExists := fileExists(approvePendingPath)
+		if approveExists && !pendingExists {
+			logrus.Warnf("[ansible] Stale approval found for %s; removing approval and waiting for approval request", workload)
+			_ = os.Remove(approvePath)
+			approveExists = false
+		}
+		if !approveExists {
+			if !pendingExists {
+				if err := os.WriteFile(approvePendingPath, []byte("pending"), 0600); err != nil {
+					return &ExitCodeError{Code: 1, Err: fmt.Errorf("failed to write approval pending file: %w", err)}
+				}
+				notifyNtfy(cfg, workload, "")
+			}
+			logrus.Infof("[ansible] Approval required for %s", workload)
+			return nil
+		}
+	}
+
+	args := []string{"-v", "-c", "local"}
+	if cfg.Mode == "plan" {
+		args = append(args, "--check")
+		logrus.Infof("[ansible] Planning workload %s", workload)
+	} else {
+		logrus.Infof("[ansible] Running workload %s", workload)
+	}
+	args = append(args, playbookPath)
+
+	code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "ansible-playbook", args...)
+	if err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
+	}
+	if code != 0 {
+		return &ExitCodeError{Code: code, Err: fmt.Errorf("ansible-playbook failed (rc=%d)", code)}
+	}
+
+	if cfg.Mode == "apply" {
+		_ = os.Remove(approvePath)
+		_ = os.Remove(approvePendingPath)
+	}
+	return nil
 }
 
 type commandOptions struct {
@@ -380,6 +468,17 @@ func fileExists(path string) bool {
 
 // MergeConfig applies env file values to the config unless locked by CLI flags.
 func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, error) {
+	if !locks.WorkloadType {
+		if value, ok := env["WORKLOAD_TYPE"]; ok {
+			cfg.WorkloadType = value
+		}
+	}
+	if cfg.WorkloadType == "" {
+		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("WORKLOAD_TYPE is required (tofu or ansible)")}
+	}
+	if cfg.WorkloadType != "tofu" && cfg.WorkloadType != "ansible" {
+		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid WORKLOAD_TYPE %q: must be tofu or ansible", cfg.WorkloadType)}
+	}
 	if !locks.Mode {
 		if value, ok := env["MODE"]; ok {
 			cfg.Mode = value

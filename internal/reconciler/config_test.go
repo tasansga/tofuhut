@@ -8,15 +8,14 @@ import (
 
 func TestMergeConfigDefaults(t *testing.T) {
 	cfg, err := MergeConfig(Config{}, ConfigLocks{}, map[string]string{})
-	assert.NoError(t, err)
-	assert.Equal(t, "plan", cfg.Mode)
-	assert.False(t, cfg.Upgrade)
-	assert.False(t, cfg.Reconfigure)
+	assert.Error(t, err)
+	assert.Equal(t, "", cfg.WorkloadType)
 }
 
 func TestMergeConfigEnvOverridesWhenUnlocked(t *testing.T) {
 	cfg := Config{Mode: "plan"}
 	env := map[string]string{
+		"WORKLOAD_TYPE": "ansible",
 		"MODE":          "apply",
 		"UPGRADE":       "true",
 		"RECONFIGURE":   "true",
@@ -24,6 +23,7 @@ func TestMergeConfigEnvOverridesWhenUnlocked(t *testing.T) {
 	}
 	merged, err := MergeConfig(cfg, ConfigLocks{}, env)
 	assert.NoError(t, err)
+	assert.Equal(t, "ansible", merged.WorkloadType)
 	assert.Equal(t, "apply", merged.Mode)
 	assert.True(t, merged.Upgrade)
 	assert.True(t, merged.Reconfigure)
@@ -31,8 +31,8 @@ func TestMergeConfigEnvOverridesWhenUnlocked(t *testing.T) {
 }
 
 func TestMergeConfigEnvIgnoredWhenLocked(t *testing.T) {
-	cfg := Config{Mode: "plan", Upgrade: false}
-	locks := ConfigLocks{Mode: true, Upgrade: true}
+	cfg := Config{WorkloadType: "tofu", Mode: "plan", Upgrade: false}
+	locks := ConfigLocks{WorkloadType: true, Mode: true, Upgrade: true}
 	env := map[string]string{"MODE": "apply", "UPGRADE": "true"}
 	merged, err := MergeConfig(cfg, locks, env)
 	assert.NoError(t, err)
@@ -41,13 +41,19 @@ func TestMergeConfigEnvIgnoredWhenLocked(t *testing.T) {
 }
 
 func TestMergeConfigInvalidMode(t *testing.T) {
-	env := map[string]string{"MODE": "invalid"}
+	env := map[string]string{"WORKLOAD_TYPE": "tofu", "MODE": "invalid"}
+	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.Error(t, err)
+}
+
+func TestMergeConfigInvalidWorkloadType(t *testing.T) {
+	env := map[string]string{"WORKLOAD_TYPE": "invalid"}
 	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
 	assert.Error(t, err)
 }
 
 func TestMergeConfigAutoApply(t *testing.T) {
-	env := map[string]string{"MODE": "auto-apply"}
+	env := map[string]string{"WORKLOAD_TYPE": "tofu", "MODE": "auto-apply"}
 	merged, err := MergeConfig(Config{}, ConfigLocks{}, env)
 	assert.NoError(t, err)
 	assert.Equal(t, "auto-apply", merged.Mode)

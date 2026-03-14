@@ -238,7 +238,7 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		return
 	}
 
-	effectiveToken, err := workloadTokenFromEnv(workload, h.cfg, h.locks)
+	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"workload": workload,
@@ -246,8 +246,8 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if effectiveToken != "" {
-		if auth := r.Header.Get("Authorization"); auth != "Bearer "+effectiveToken {
+	if mergedCfg.WorkloadToken != "" {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer "+mergedCfg.WorkloadToken {
 			logrus.WithFields(logrus.Fields{
 				"workload": workload,
 			}).Warn("approve request rejected: unauthorized")
@@ -272,20 +272,53 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		return
 	}
 
-	planPath := filepath.Join(workdir, "plan.tfplan")
-	if _, err := os.Stat(planPath); err != nil {
-		if os.IsNotExist(err) {
+	if mergedCfg.WorkloadType == "ansible" {
+		playbookPath := filepath.Join(workdir, "playbook.yml")
+		if _, err := os.Stat(playbookPath); err != nil {
+			if os.IsNotExist(err) {
+				logrus.WithFields(logrus.Fields{
+					"workload": workload,
+				}).Warn("approve request rejected: playbook not found")
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
 			logrus.WithFields(logrus.Fields{
 				"workload": workload,
-			}).Warn("approve request rejected: plan not found")
-			w.WriteHeader(http.StatusConflict)
+			}).Error("approve request failed: playbook stat error")
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
-		}).Error("approve request failed: plan stat error")
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		approvePendingPath := filepath.Join(workdir, "approve.pending")
+		if _, err := os.Stat(approvePendingPath); err != nil {
+			if os.IsNotExist(err) {
+				logrus.WithFields(logrus.Fields{
+					"workload": workload,
+				}).Warn("approve request rejected: no pending approval")
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+			}).Error("approve request failed: pending approval stat error")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	} else {
+		planPath := filepath.Join(workdir, "plan.tfplan")
+		if _, err := os.Stat(planPath); err != nil {
+			if os.IsNotExist(err) {
+				logrus.WithFields(logrus.Fields{
+					"workload": workload,
+				}).Warn("approve request rejected: plan not found")
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+			}).Error("approve request failed: plan stat error")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
 
 	approvePath := filepath.Join(workdir, "approve")
@@ -337,7 +370,7 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	effectiveToken, err := workloadTokenFromEnv(workload, h.cfg, h.locks)
+	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"workload": workload,
@@ -345,8 +378,8 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if effectiveToken != "" {
-		if auth := r.Header.Get("Authorization"); auth != "Bearer "+effectiveToken {
+	if mergedCfg.WorkloadToken != "" {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer "+mergedCfg.WorkloadToken {
 			logrus.WithFields(logrus.Fields{
 				"workload": workload,
 			}).Warn("reconcile request rejected: unauthorized")
@@ -632,17 +665,17 @@ func (r *triggerRunner) Run(ctx context.Context, workload string) error {
 	return r.dispatcher.TriggerSync(ctx, workload)
 }
 
-func workloadTokenFromEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks) (string, error) {
+func workloadConfigFromEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks) (reconciler.Config, error) {
 	envFile := reconciler.EnvFilePath(workload)
 	envFromFile, err := reconciler.LoadEnvFile(envFile)
 	if err != nil {
-		return "", err
+		return reconciler.Config{}, err
 	}
 	merged, err := reconciler.MergeConfig(cfg, locks, envFromFile)
 	if err != nil {
-		return "", err
+		return reconciler.Config{}, err
 	}
-	return merged.WorkloadToken, nil
+	return merged, nil
 }
 
 func toSchedulerSpecs(specs []reconciler.WorkloadSpec) []scheduler.WorkloadSpec {
@@ -685,6 +718,10 @@ func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config
 		}
 		merged, err := reconciler.MergeConfig(cfg, locks, envFromFile)
 		if err != nil {
+			problems = append(problems, spec.Name+": "+err.Error())
+			continue
+		}
+		if err := reconciler.ValidateRuntime(merged); err != nil {
 			problems = append(problems, spec.Name+": "+err.Error())
 			continue
 		}
