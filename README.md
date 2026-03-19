@@ -1,53 +1,99 @@
-**Tofuhut**
-Tofuhut is a small infrastructure reconciler CLI. It runs `tofu` (OpenTofu), `ansible-playbook`, or `dnscontrol` for a workload directory, while supporting optional Gatus reporting.
+# Tofuhut
 
-**Usage**
-Run a workload once: `tofuhut workload run <name>`
-Print embedded templates:
-- `tofuhut print systemd-service`
-- `tofuhut print systemd-timer`
-- `tofuhut print workload-env`
+Tofuhut is an infrastructure reconciler CLI for three workload types:
 
-Run approval webhook server:
-- `tofuhut approve-server --listen :8080`
+- `ansible`
+- `dnscontrol`
+- `tofu` (OpenTofu)
 
-**Workload Layout**
-- `/var/lib/tofuhut/workloads/<workload>` is the working directory.
-- `/etc/tofuhut/workloads/<workload>.env` provides workload-specific environment variables.
+It supports `plan`/`apply`/`auto-apply` modes, approval-gated runs, optional `ntfy` notifications, and optional Gatus reporting.
 
-**Environment Variables**
-- `MODE=apply` enables the approval workflow.
-- `MODE=auto-apply` applies immediately when changes are detected.
-- Default is plan only.
-- `UPGRADE=true` adds `-upgrade` to `tofu init`.
-- `RECONFIGURE=true` adds `-reconfigure` to `tofu init`.
-- `GATUS_CLI_URL` and `GATUS_CLI_TOKEN` enable Gatus reporting. Alternatively define a function `gatus_cli_token_for_name` in the env file to supply a token for the workload name.
-- `NTFY_URL`, `NTFY_TOPIC`, and `NTFY_TOKEN` enable ntfy notifications when approval is required.
-- `APPROVE_URL` and `WORKLOAD_TOKEN` configure the approval webhook used by ntfy action buttons.
-- `WORKLOAD_TYPE` selects the workload runner: `tofu`, `ansible`, or `dnscontrol`.
-- `ansible` expects `playbook.yml` in the workload directory; `plan` runs `ansible-playbook --check`.
-- `dnscontrol` expects `dnsconfig.js` in the workload directory; `plan` runs `dnscontrol preview --report`.
+## Usage
 
-**Environment Propagation**
-Tofuhut passes a restricted allowlist of host environment variables to workload commands, then merges in variables from the workload env file. The allowlist is intentionally minimal (PATH, locale, proxy, certs, temp dirs, and basic user/home fields). Add provider credentials (e.g. AWS_ or DNS provider tokens) to the workload env file explicitly.
+Run a workload once:
 
-**Systemd Templates**
-Tofuhut embeds systemd unit templates for instance-based workloads:
+- `tofuhut workload run <name>`
+
+Run approval/reconciliation server:
+
+- `tofuhut server run --listen :8080`
+
+## Workload Layout
+
+- Working directory: `/var/lib/tofuhut/workloads/<workload>`
+- Env file: `/etc/tofuhut/workloads/<workload>.env`
+
+Required workload files:
+
+- `ansible`: `playbook.yml`
+- `dnscontrol`: `dnsconfig.js`
+- `tofu`: OpenTofu files like `*.tf`
+
+## Environment Variables
+
+Common:
+
+- `WORKLOAD_TYPE` (required): `ansible`, `dnscontrol`, or `tofu`
+- `MODE`: `plan`, `apply`, or `auto-apply` (default: `plan`)
+- `GATUS_CLI_URL`, `GATUS_CLI_TOKEN`
+- `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
+- `APPROVE_URL`, `WORKLOAD_TOKEN`
+- `RECONCILE_ENABLED`, `RECONCILE_INTERVAL` (scheduler)
+
+Tofu-specific:
+
+- `UPGRADE=true` -> adds `-upgrade` to `tofu init`
+- `RECONFIGURE=true` -> adds `-reconfigure` to `tofu init`
+
+## Workload Behavior
+
+| Workload type | `plan` | `apply` | `auto-apply` |
+| --- | --- | --- | --- |
+| `ansible` | `ansible-playbook -v -c local --check playbook.yml` | Waits for approval, then runs `ansible-playbook -v -c local playbook.yml` | Runs `ansible-playbook -v -c local playbook.yml` |
+| `dnscontrol` | `dnscontrol preview --report preview-report.json` | Writes preview artifacts, waits for approval, then runs `dnscontrol push` | Runs `dnscontrol push` when preview shows changes |
+| `tofu` | `tofu init`, then `tofu plan -input=false -no-color -detailed-exitcode` | Stores plan artifacts, waits for approval, then applies stored plan | Runs `tofu apply -input=false -auto-approve` when plan shows changes |
+
+## Approval and API
+
+In `MODE=apply`, approval is recorded by creating:
+
+- `/var/lib/tofuhut/workloads/<workload>/approve`
+
+HTTP endpoints:
+
+- `POST /approve/<workload>` records approval
+- `POST /reconcile/<workload>` triggers reconciliation
+
+If `WORKLOAD_TOKEN` is set, both endpoints require:
+
+- `Authorization: Bearer <token>`
+
+## Approval Artifacts by Workload Type
+
+- `ansible`: creates `approve.pending` while waiting for approval
+- `dnscontrol`: writes `<workload>-preview.txt` and `preview-report.json`, and creates `approve.pending`
+- `tofu`: writes `plan.tfplan` and `<workload>-plan.txt`
+
+On successful approved run, Tofuhut removes approval/pending artifacts.
+
+## Notifications and Reporting
+
+- `ntfy` notifications are sent when approval is required and `NTFY_URL` + `NTFY_TOPIC` are set
+- ntfy Approve action is included when `APPROVE_URL` is set
+- Gatus success/failure reporting is enabled when `GATUS_CLI_URL` + token are configured
+- Server responses include CORS header `Access-Control-Allow-Origin: *`
+
+## Environment Propagation
+
+Tofuhut passes a restricted allowlist of host env vars to workload commands, then merges values from the workload env file. Add provider credentials explicitly in each workload env file.
+
+## Systemd Templates
+
+Embedded example workload templates, available with `tofuhut workload print`:
+
 - `tofuhut-workload@.service`
 - `tofuhut-workload@.timer`
-These use the instance name (`%i`) for the workload name. The service runs:
-- `ExecStart=/usr/local/bin/tofuhut workload run %i`
 
-**Notes**
-- `TF_IN_AUTOMATION` defaults to `1` and `TF_INPUT=0` to keep runs non-interactive.
-- `tofu plan` runs with `-no-color` and `-detailed-exitcode` to detect changes.
+Workload service command:
 
-**Approval Workflow (MODE=apply)**
-For `tofu`, when changes are detected, the plan is written to `/var/lib/tofuhut/workloads/<workload>/plan.tfplan` (binary plan) and `/var/lib/tofuhut/workloads/<workload>/<workload>-plan.txt` (human-readable output).
-For `dnscontrol`, preview output is written to `/var/lib/tofuhut/workloads/<workload>/<workload>-preview.txt` and `/var/lib/tofuhut/workloads/<workload>/preview-report.json`.
-For `ansible`, tofuhut creates `/var/lib/tofuhut/workloads/<workload>/approve.pending` to indicate an approval is waiting.
-Create `/var/lib/tofuhut/workloads/<workload>/approve` to approve.
-On the next run, if `approve` exists, the pending change is applied and approval artifacts are removed.
-A ntfy notification is sent when approval is required if `NTFY_URL` and `NTFY_TOPIC` are set.
-The notification includes an Approve action if `APPROVE_URL` is set.
-If you use the ntfy web app, the approval endpoint must allow CORS from the web app origin (or `*`); `approve-server` sets `Access-Control-Allow-Origin: *`.
+- `ExecStart=tofuhut workload run %i`
