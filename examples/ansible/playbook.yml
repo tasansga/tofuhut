@@ -1,0 +1,8 @@
+---
+- name: Minimal ansible example
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Show workload execution
+      ansible.builtin.debug:
+        msg: "tofuhut ansible example run"
