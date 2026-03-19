@@ -240,6 +240,92 @@ func TestRunAnsibleApplyRequiresApproval(t *testing.T) {
 	assert.NoFileExists(t, logPath)
 }
 
+func TestRunDNSControlPlanNoChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
+	previewTextPath := filepath.Join(workdir, "workload-preview.txt")
+	previewReportPath := filepath.Join(workdir, "preview-report.json")
+
+	tmpBin := t.TempDir()
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns preview\"\necho '[{\"domain\":\"example.com\",\"corrections\":0}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
+
+	cfg := Config{WorkloadType: "dnscontrol", Mode: "plan"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.NoFileExists(t, previewTextPath)
+	assert.FileExists(t, previewReportPath)
+}
+
+func TestRunDNSControlApplyWritesPreviewAndWaitsForApproval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
+	previewTextPath := filepath.Join(workdir, "workload-preview.txt")
+	previewReportPath := filepath.Join(workdir, "preview-report.json")
+	approvePendingPath := filepath.Join(workdir, "approve.pending")
+
+	tmpBin := t.TempDir()
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns changes\"\necho '[{\"domain\":\"example.com\",\"corrections\":2}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
+
+	cfg := Config{WorkloadType: "dnscontrol", Mode: "apply", WorkloadToken: "token"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.FileExists(t, previewTextPath)
+	assert.FileExists(t, previewReportPath)
+	assert.FileExists(t, approvePendingPath)
+	assertFileMode(t, previewTextPath, 0600)
+	assertFileMode(t, previewReportPath, 0600)
+	assertFileMode(t, approvePendingPath, 0600)
+}
+
+func TestRunDNSControlApplyUsesApproval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	base, _ := withTempDirs(t)
+	workdir := filepath.Join(base, "workload")
+	newWorkloadDir(t, workdir)
+	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
+	previewTextPath := filepath.Join(workdir, "workload-preview.txt")
+	previewReportPath := filepath.Join(workdir, "preview-report.json")
+	approvePendingPath := filepath.Join(workdir, "approve.pending")
+	approvePath := filepath.Join(workdir, "approve")
+	pushLog := filepath.Join(workdir, "dnscontrol.log")
+
+	tmpBin := t.TempDir()
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns changes\"\necho '[{\"domain\":\"example.com\",\"corrections\":1}]' > \"$report\"\nexit 0\nfi\nif [ \"$cmd\" = \"push\" ]; then\necho \"push $@\" >> \""+pushLog+"\"\nexit 0\nfi\nexit 1\n")
+
+	cfg := Config{WorkloadType: "dnscontrol", Mode: "apply", WorkloadToken: "token"}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.FileExists(t, approvePendingPath)
+
+	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0600))
+
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	assert.NoError(t, err)
+	assert.NoFileExists(t, approvePath)
+	assert.NoFileExists(t, approvePendingPath)
+	assert.NoFileExists(t, previewTextPath)
+	assert.NoFileExists(t, previewReportPath)
+
+	data, err := os.ReadFile(pushLog)
+	assert.NoError(t, err)
+	assert.True(t, strings.Contains(string(data), "push"))
+}
+
 func TestRunCommandEmptyEnvPreserved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts are not supported on windows")

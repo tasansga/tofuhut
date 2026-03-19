@@ -10,7 +10,7 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:           "tofuhut",
-	Short:         "Tofuhut OpenTofu reconciler",
+	Short:         "Tofuhut infrastructure reconciler",
 	Version:       buildVersion(),
 	SilenceUsage:  true,
 	SilenceErrors: true,

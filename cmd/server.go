@@ -272,7 +272,8 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		return
 	}
 
-	if mergedCfg.WorkloadType == "ansible" {
+	switch mergedCfg.WorkloadType {
+	case "ansible":
 		playbookPath := filepath.Join(workdir, "playbook.yml")
 		if _, err := os.Stat(playbookPath); err != nil {
 			if os.IsNotExist(err) {
@@ -303,7 +304,38 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-	} else {
+	case "dnscontrol":
+		dnsConfigPath := filepath.Join(workdir, "dnsconfig.js")
+		if _, err := os.Stat(dnsConfigPath); err != nil {
+			if os.IsNotExist(err) {
+				logrus.WithFields(logrus.Fields{
+					"workload": workload,
+				}).Warn("approve request rejected: dnsconfig not found")
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+			}).Error("approve request failed: dnsconfig stat error")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		approvePendingPath := filepath.Join(workdir, "approve.pending")
+		if _, err := os.Stat(approvePendingPath); err != nil {
+			if os.IsNotExist(err) {
+				logrus.WithFields(logrus.Fields{
+					"workload": workload,
+				}).Warn("approve request rejected: no pending approval")
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			logrus.WithFields(logrus.Fields{
+				"workload": workload,
+			}).Error("approve request failed: pending approval stat error")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	default:
 		planPath := filepath.Join(workdir, "plan.tfplan")
 		if _, err := os.Stat(planPath); err != nil {
 			if os.IsNotExist(err) {

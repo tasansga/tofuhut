@@ -3,6 +3,7 @@ package reconciler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -74,12 +75,12 @@ func WorkDirPath(workload string) string {
 	return filepath.Join(workDirBase, workload)
 }
 
-// Run executes the OpenTofu reconciler flow for the given workload name.
+// Run executes the reconciler flow for the given workload name.
 func Run(workload string, cfg Config, envFile string, envFromFile map[string]string) error {
 	return RunWithContext(context.Background(), workload, cfg, envFile, envFromFile)
 }
 
-// RunWithContext executes the OpenTofu reconciler flow for the given workload name.
+// RunWithContext executes the reconciler flow for the given workload name.
 func RunWithContext(ctx context.Context, workload string, cfg Config, envFile string, envFromFile map[string]string) error {
 	workdir := filepath.Join(workDirBase, workload)
 	planTextPath := filepath.Join(workdir, fmt.Sprintf("%s-plan.txt", workload))
@@ -87,6 +88,9 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 	approvePath := filepath.Join(workdir, "approve")
 	approvePendingPath := approvePath + ".pending"
 	playbookPath := filepath.Join(workdir, "playbook.yml")
+	dnsConfigPath := filepath.Join(workdir, "dnsconfig.js")
+	dnsPreviewTextPath := filepath.Join(workdir, fmt.Sprintf("%s-preview.txt", workload))
+	dnsPreviewReportPath := filepath.Join(workdir, "preview-report.json")
 
 	if _, err := os.Stat(workdir); err != nil {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("workload directory %s not found", workdir)}
@@ -121,6 +125,17 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 
 	if cfg.WorkloadType == "ansible" {
 		if err := runAnsible(ctx, workload, cfg, approvePath, approvePendingPath, playbookPath, cmdEnv, workdir); err != nil {
+			if exitErr, ok := err.(*ExitCodeError); ok {
+				exitCode = exitErr.Code
+			} else {
+				exitCode = 1
+			}
+			return err
+		}
+		return nil
+	}
+	if cfg.WorkloadType == "dnscontrol" {
+		if err := runDNSControl(ctx, workload, cfg, approvePath, approvePendingPath, dnsConfigPath, dnsPreviewTextPath, dnsPreviewReportPath, cmdEnv, workdir); err != nil {
 			if exitErr, ok := err.(*ExitCodeError); ok {
 				exitCode = exitErr.Code
 			} else {
@@ -237,6 +252,10 @@ func ensureCommandAvailable(workloadType string) error {
 		if _, err := exec.LookPath("ansible-playbook"); err != nil {
 			return &ExitCodeError{Code: 1, Err: fmt.Errorf("ansible-playbook not found in PATH")}
 		}
+	case "dnscontrol":
+		if _, err := exec.LookPath("dnscontrol"); err != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("dnscontrol not found in PATH")}
+		}
 	case "tofu":
 		if _, err := exec.LookPath("tofu"); err != nil {
 			return &ExitCodeError{Code: 1, Err: fmt.Errorf("tofu not found in PATH")}
@@ -300,6 +319,123 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 		_ = os.Remove(approvePendingPath)
 	}
 	return nil
+}
+
+type dnscontrolReport struct {
+	Corrections int `json:"corrections"`
+}
+
+func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath, approvePendingPath, dnsConfigPath, previewTextPath, previewReportPath string, cmdEnv []string, workdir string) error {
+	if _, err := os.Stat(dnsConfigPath); err != nil {
+		if os.IsNotExist(err) {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("dnsconfig %s not found for workload %s", dnsConfigPath, workload)}
+		}
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("unable to stat dnsconfig %s: %w", dnsConfigPath, err)}
+	}
+
+	pendingExists := false
+	if cfg.Mode == "apply" {
+		approveExists := fileExists(approvePath)
+		pendingExists = fileExists(approvePendingPath)
+		if approveExists && !pendingExists {
+			logrus.Warnf("[dnscontrol] Stale approval found for %s; removing approval and waiting for approval request", workload)
+			_ = os.Remove(approvePath)
+			approveExists = false
+		}
+		if approveExists {
+			logrus.Infof("[dnscontrol] Approval found for %s, applying changes", workload)
+			code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "dnscontrol", "push")
+			if err != nil {
+				return &ExitCodeError{Code: 1, Err: err}
+			}
+			if code != 0 {
+				return &ExitCodeError{Code: code, Err: fmt.Errorf("dnscontrol push failed (rc=%d)", code)}
+			}
+			_ = os.Remove(approvePath)
+			_ = os.Remove(approvePendingPath)
+			_ = os.Remove(previewTextPath)
+			_ = os.Remove(previewReportPath)
+			return nil
+		}
+	}
+
+	logrus.Infof("[dnscontrol] Previewing workload %s", workload)
+	var previewOut bytes.Buffer
+	code, err := runCommand(ctx, commandOptions{
+		Env:    cmdEnv,
+		Dir:    workdir,
+		Stdout: io.MultiWriter(os.Stdout, &previewOut),
+	}, "dnscontrol", "preview", "--report", previewReportPath)
+	if err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
+	}
+	if code != 0 {
+		return &ExitCodeError{Code: code, Err: fmt.Errorf("dnscontrol preview failed (rc=%d)", code)}
+	}
+
+	changed, err := dnscontrolPreviewHasChanges(previewReportPath)
+	if err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
+	}
+	if !changed {
+		logrus.Infof("[dnscontrol] No changes for %s", workload)
+		if cfg.Mode == "apply" {
+			_ = os.Remove(previewTextPath)
+			_ = os.Remove(previewReportPath)
+			_ = os.Remove(approvePendingPath)
+		}
+		return nil
+	}
+
+	logrus.Infof("[dnscontrol] Changes detected for %s", workload)
+	if cfg.Mode == "auto-apply" {
+		logrus.Infof("[dnscontrol] Auto-apply enabled for %s", workload)
+		code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "dnscontrol", "push")
+		if err != nil {
+			return &ExitCodeError{Code: 1, Err: err}
+		}
+		if code != 0 {
+			return &ExitCodeError{Code: code, Err: fmt.Errorf("dnscontrol push failed (rc=%d)", code)}
+		}
+		_ = os.Remove(previewTextPath)
+		_ = os.Remove(previewReportPath)
+		return nil
+	}
+	if cfg.Mode == "apply" {
+		if err := os.WriteFile(previewTextPath, previewOut.Bytes(), 0600); err != nil {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("failed to write preview output: %w", err)}
+		}
+		if fileExists(previewReportPath) {
+			_ = os.Chmod(previewReportPath, 0600)
+		}
+		if !pendingExists {
+			if err := os.WriteFile(approvePendingPath, []byte("pending"), 0600); err != nil {
+				return &ExitCodeError{Code: 1, Err: fmt.Errorf("failed to write approval pending file: %w", err)}
+			}
+			notifyNtfy(cfg, workload, previewTextPath)
+		}
+		logrus.Infof("[dnscontrol] Preview written to %s; approval required", previewTextPath)
+	}
+
+	return nil
+}
+
+func dnscontrolPreviewHasChanges(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("failed to read dnscontrol preview report: %w", err)
+	}
+
+	var report []dnscontrolReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return false, fmt.Errorf("failed to parse dnscontrol preview report: %w", err)
+	}
+	for _, row := range report {
+		if row.Corrections > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type commandOptions struct {
@@ -474,10 +610,10 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 		}
 	}
 	if cfg.WorkloadType == "" {
-		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("WORKLOAD_TYPE is required (tofu or ansible)")}
+		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("WORKLOAD_TYPE is required (tofu, ansible, or dnscontrol)")}
 	}
-	if cfg.WorkloadType != "tofu" && cfg.WorkloadType != "ansible" {
-		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid WORKLOAD_TYPE %q: must be tofu or ansible", cfg.WorkloadType)}
+	if cfg.WorkloadType != "tofu" && cfg.WorkloadType != "ansible" && cfg.WorkloadType != "dnscontrol" {
+		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid WORKLOAD_TYPE %q: must be tofu, ansible, or dnscontrol", cfg.WorkloadType)}
 	}
 	if !locks.Mode {
 		if value, ok := env["MODE"]; ok {

@@ -106,6 +106,32 @@ func TestApproveServerAllowsAnsibleWithoutPlan(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestApproveServerAllowsDNSControlWithoutPlan(t *testing.T) {
+	base := t.TempDir()
+	restore := reconciler.SetWorkDirBaseForTests(base)
+	t.Cleanup(restore)
+	envBase := t.TempDir()
+	restoreEnv := reconciler.SetEnvDirForTests(envBase)
+	t.Cleanup(restoreEnv)
+
+	workdir := filepath.Join(base, "demo")
+	assert.NoError(t, os.MkdirAll(workdir, 0755))
+	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "approve.pending"), []byte("pending"), 0600))
+
+	envFile := filepath.Join(envBase, "demo.env")
+	assert.NoError(t, os.WriteFile(envFile, []byte("WORKLOAD_TYPE=dnscontrol\nWORKLOAD_TOKEN=token\n"), 0644))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
+	req.Header.Set("Authorization", "Bearer token")
+
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestReconcileStartsWorkload(t *testing.T) {
 	base := t.TempDir()
 	restore := reconciler.SetWorkDirBaseForTests(base)

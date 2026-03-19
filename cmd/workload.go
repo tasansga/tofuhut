@@ -10,12 +10,12 @@ import (
 
 var workloadCmd = &cobra.Command{
 	Use:   "workload",
-	Short: "Manage OpenTofu workloads",
+	Short: "Manage infrastructure workloads",
 }
 
 var workloadRunCmd = &cobra.Command{
 	Use:   "run <name>",
-	Short: "Run the OpenTofu reconciler for a workload",
+	Short: "Run the reconciler for a workload",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -73,7 +73,7 @@ func init() {
 	workloadRunCmd.Flags().String("ntfy-token", "", "ntfy access token (env NTFY_TOKEN)")
 	workloadRunCmd.Flags().String("approve-url", "", "Approval webhook URL for ntfy action (env APPROVE_URL)")
 	workloadRunCmd.Flags().String("workload-token", "", "Workload token for approval and reconcile (env WORKLOAD_TOKEN)")
-	workloadRunCmd.Flags().String("mode", "", "Run mode: plan or apply (env MODE)")
+	workloadRunCmd.Flags().String("mode", "", "Run mode: plan, apply, or auto-apply (env MODE)")
 	workloadRunCmd.Flags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
 	workloadRunCmd.Flags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
 }

@@ -53,7 +53,7 @@ func postNtfy(cfg ntfyConfig, workload, planTextPath string) error {
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(payload, "OpenTofu changes detected for %s. Approval required.", workload)
+	_, _ = fmt.Fprintf(payload, "Changes detected for %s. Approval required.", workload)
 
 	if planTextPath != "" {
 		if data, err := os.ReadFile(planTextPath); err == nil {

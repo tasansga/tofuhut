@@ -58,3 +58,10 @@ func TestMergeConfigAutoApply(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "auto-apply", merged.Mode)
 }
+
+func TestMergeConfigDNSControlWorkloadType(t *testing.T) {
+	env := map[string]string{"WORKLOAD_TYPE": "dnscontrol", "MODE": "plan"}
+	merged, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.NoError(t, err)
+	assert.Equal(t, "dnscontrol", merged.WorkloadType)
+}
