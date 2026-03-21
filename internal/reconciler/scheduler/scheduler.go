@@ -2,6 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -88,19 +91,23 @@ func (s *Scheduler) runWorkload(ctx context.Context, spec WorkloadSpec) {
 		}
 
 		start := time.Now()
-		err := s.runner.Run(ctx, spec.Name)
+		runID := newScheduledRunID()
+		runCtx := reconciler.WithRequestID(ctx, runID)
+		err := s.runner.Run(runCtx, spec.Name)
 		latency := time.Since(start)
 		if err != nil {
 			logrus.WithError(err).WithFields(logrus.Fields{
-				"component": "scheduler",
-				"workload":  spec.Name,
-				"latency":   latency.String(),
+				"component":  "scheduler",
+				"workload":   spec.Name,
+				"request_id": runID,
+				"latency":    latency.String(),
 			}).Warn("scheduled workload run failed")
 		} else {
 			logrus.WithFields(logrus.Fields{
-				"component": "scheduler",
-				"workload":  spec.Name,
-				"latency":   latency.String(),
+				"component":  "scheduler",
+				"workload":   spec.Name,
+				"request_id": runID,
+				"latency":    latency.String(),
 			}).Info("scheduled workload run completed")
 		}
 
@@ -145,4 +152,12 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func newScheduledRunID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("sched-%d", time.Now().UnixNano())
+	}
+	return "sched-" + hex.EncodeToString(buf)
 }

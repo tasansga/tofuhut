@@ -80,6 +80,17 @@ func TestApproveServerRejectsMissingPlan(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestServeHTTPSetsRequestIDHeader(t *testing.T) {
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/unknown", nil)
+
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotEmpty(t, rec.Header().Get("X-Request-ID"))
+}
+
 func TestApproveServerAllowsAnsibleWithoutPlan(t *testing.T) {
 	base := t.TempDir()
 	restore := reconciler.SetWorkDirBaseForTests(base)

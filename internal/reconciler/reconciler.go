@@ -110,10 +110,10 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 	var exitCode int
 	defer func() {
 		if ctx.Err() != nil {
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"workload": workload,
 				"error":    ctx.Err().Error(),
-			}).Info("reconciler canceled; skipping notifications")
+			})).Info("reconciler canceled; skipping notifications")
 			return
 		}
 		if exitCode != 0 {
@@ -154,12 +154,12 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 		initArgs = append(initArgs, "-reconfigure")
 	}
 
-	logrus.WithFields(logrus.Fields{
+	logrus.WithFields(withRequestID(ctx, logrus.Fields{
 		"component":     "reconciler",
 		"workload":      workload,
 		"workload_type": "tofu",
 		"mode":          cfg.Mode,
-	}).Info("initializing workload")
+	})).Info("initializing workload")
 	if code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", initArgs...); err != nil {
 		exitCode = 1
 		return &ExitCodeError{Code: 1, Err: err}
@@ -173,20 +173,20 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 	if cfg.Mode == "apply" {
 		if planExists {
 			if !approveExists {
-				logrus.WithFields(logrus.Fields{
+				logrus.WithFields(withRequestID(ctx, logrus.Fields{
 					"component":     "reconciler",
 					"workload":      workload,
 					"workload_type": "tofu",
 					"mode":          cfg.Mode,
-				}).Info("plan pending approval")
+				})).Info("plan pending approval")
 				return nil
 			}
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "tofu",
 				"mode":          cfg.Mode,
-			}).Info("approval found; applying stored plan")
+			})).Info("approval found; applying stored plan")
 			applyArgs := []string{"apply", "-input=false", "-auto-approve", planFilePath}
 			if code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
 				exitCode = 1
@@ -201,22 +201,22 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 			return nil
 		}
 		if approveExists {
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "tofu",
 				"mode":          cfg.Mode,
-			}).Warn("approval file exists without plan; removing approval and replanning")
+			})).Warn("approval file exists without plan; removing approval and replanning")
 			_ = os.Remove(approvePath)
 		}
 	}
 
-	logrus.WithFields(logrus.Fields{
+	logrus.WithFields(withRequestID(ctx, logrus.Fields{
 		"component":     "reconciler",
 		"workload":      workload,
 		"workload_type": "tofu",
 		"mode":          cfg.Mode,
-	}).Info("planning workload")
+	})).Info("planning workload")
 	planArgs := []string{"plan", "-input=false", "-no-color", "-detailed-exitcode"}
 	if cfg.Mode == "apply" {
 		planArgs = append(planArgs, "-out", planFilePath)
@@ -234,24 +234,24 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 
 	switch planCode {
 	case 0:
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":     "reconciler",
 			"workload":      workload,
 			"workload_type": "tofu",
 			"mode":          cfg.Mode,
-		}).Info("no changes")
+		})).Info("no changes")
 		if cfg.Mode == "apply" {
 			_ = os.Remove(planFilePath)
 			_ = os.Remove(planTextPath)
 		}
 		return nil
 	case 2:
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":     "reconciler",
 			"workload":      workload,
 			"workload_type": "tofu",
 			"mode":          cfg.Mode,
-		}).Info("changes detected")
+		})).Info("changes detected")
 		if cfg.Mode == "apply" {
 			if err := os.WriteFile(planTextPath, planOut.Bytes(), 0600); err != nil {
 				exitCode = 1
@@ -260,22 +260,22 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 			if fileExists(planFilePath) {
 				_ = os.Chmod(planFilePath, 0600)
 			}
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":      "reconciler",
 				"workload":       workload,
 				"workload_type":  "tofu",
 				"mode":           cfg.Mode,
 				"plan_text_path": planTextPath,
-			}).Info("plan written; approval required")
+			})).Info("plan written; approval required")
 			notifyNtfy(cfg, workload, planTextPath)
 		}
 		if cfg.Mode == "auto-apply" {
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "tofu",
 				"mode":          cfg.Mode,
-			}).Info("auto-apply enabled")
+			})).Info("auto-apply enabled")
 			applyArgs := []string{"apply", "-input=false", "-auto-approve"}
 			if code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "tofu", applyArgs...); err != nil {
 				exitCode = 1
@@ -327,12 +327,12 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 		approveExists := fileExists(approvePath)
 		pendingExists := fileExists(approvePendingPath)
 		if approveExists && !pendingExists {
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "ansible",
 				"mode":          cfg.Mode,
-			}).Warn("stale approval found; removing approval and waiting for approval request")
+			})).Warn("stale approval found; removing approval and waiting for approval request")
 			_ = os.Remove(approvePath)
 			approveExists = false
 		}
@@ -343,12 +343,12 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 				}
 				notifyNtfy(cfg, workload, "")
 			}
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "ansible",
 				"mode":          cfg.Mode,
-			}).Info("approval required")
+			})).Info("approval required")
 			return nil
 		}
 	}
@@ -356,19 +356,19 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 	args := []string{"-v", "-c", "local"}
 	if cfg.Mode == "plan" {
 		args = append(args, "--check")
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":     "reconciler",
 			"workload":      workload,
 			"workload_type": "ansible",
 			"mode":          cfg.Mode,
-		}).Info("planning workload")
+		})).Info("planning workload")
 	} else {
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":     "reconciler",
 			"workload":      workload,
 			"workload_type": "ansible",
 			"mode":          cfg.Mode,
-		}).Info("running workload")
+		})).Info("running workload")
 	}
 	args = append(args, playbookPath)
 
@@ -404,22 +404,22 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 		approveExists := fileExists(approvePath)
 		pendingExists = fileExists(approvePendingPath)
 		if approveExists && !pendingExists {
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "dnscontrol",
 				"mode":          cfg.Mode,
-			}).Warn("stale approval found; removing approval and waiting for approval request")
+			})).Warn("stale approval found; removing approval and waiting for approval request")
 			_ = os.Remove(approvePath)
 			approveExists = false
 		}
 		if approveExists {
-			logrus.WithFields(logrus.Fields{
+			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
 				"workload":      workload,
 				"workload_type": "dnscontrol",
 				"mode":          cfg.Mode,
-			}).Info("approval found; applying changes")
+			})).Info("approval found; applying changes")
 			code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "dnscontrol", "push")
 			if err != nil {
 				return &ExitCodeError{Code: 1, Err: err}
@@ -435,12 +435,12 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 		}
 	}
 
-	logrus.WithFields(logrus.Fields{
+	logrus.WithFields(withRequestID(ctx, logrus.Fields{
 		"component":     "reconciler",
 		"workload":      workload,
 		"workload_type": "dnscontrol",
 		"mode":          cfg.Mode,
-	}).Info("previewing workload")
+	})).Info("previewing workload")
 	var previewOut bytes.Buffer
 	code, err := runCommand(ctx, commandOptions{
 		Env:    cmdEnv,
@@ -459,12 +459,12 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 		return &ExitCodeError{Code: 1, Err: err}
 	}
 	if !changed {
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":     "reconciler",
 			"workload":      workload,
 			"workload_type": "dnscontrol",
 			"mode":          cfg.Mode,
-		}).Info("no changes")
+		})).Info("no changes")
 		if cfg.Mode == "apply" {
 			_ = os.Remove(previewTextPath)
 			_ = os.Remove(previewReportPath)
@@ -473,19 +473,19 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 		return nil
 	}
 
-	logrus.WithFields(logrus.Fields{
+	logrus.WithFields(withRequestID(ctx, logrus.Fields{
 		"component":     "reconciler",
 		"workload":      workload,
 		"workload_type": "dnscontrol",
 		"mode":          cfg.Mode,
-	}).Info("changes detected")
+	})).Info("changes detected")
 	if cfg.Mode == "auto-apply" {
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":     "reconciler",
 			"workload":      workload,
 			"workload_type": "dnscontrol",
 			"mode":          cfg.Mode,
-		}).Info("auto-apply enabled")
+		})).Info("auto-apply enabled")
 		code, err := runCommand(ctx, commandOptions{Env: cmdEnv, Dir: workdir}, "dnscontrol", "push")
 		if err != nil {
 			return &ExitCodeError{Code: 1, Err: err}
@@ -510,13 +510,13 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 			}
 			notifyNtfy(cfg, workload, previewTextPath)
 		}
-		logrus.WithFields(logrus.Fields{
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
 			"component":        "reconciler",
 			"workload":         workload,
 			"workload_type":    "dnscontrol",
 			"mode":             cfg.Mode,
 			"preview_txt_path": previewTextPath,
-		}).Info("preview written; approval required")
+		})).Info("preview written; approval required")
 	}
 
 	return nil
@@ -672,6 +672,13 @@ func setDefaultEnvValue(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+func withRequestID(ctx context.Context, fields logrus.Fields) logrus.Fields {
+	if requestID, ok := RequestIDFromContext(ctx); ok {
+		fields["request_id"] = requestID
+	}
+	return fields
 }
 
 func parseEnvBlob(blob []byte) map[string]string {

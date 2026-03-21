@@ -39,7 +39,7 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 		return err
 	}
 
-	logrus.WithFields(logrus.Fields{
+	startFields := logrus.Fields{
 		"component":       "runner",
 		"workload":        workload,
 		"mode":            mergedConfig.Mode,
@@ -48,16 +48,24 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 		"reconfigure":     mergedConfig.Reconfigure,
 		"gatus_cli_url":   mergedConfig.GatusURL,
 		"gatus_has_token": mergedConfig.GatusToken != "",
-	}).Debug("starting workload run")
+	}
+	if requestID, ok := RequestIDFromContext(ctx); ok {
+		startFields["request_id"] = requestID
+	}
+	logrus.WithFields(startFields).Debug("starting workload run")
 
 	if err := RunWithContext(ctx, workload, mergedConfig, envFile, envFromFile); err != nil {
 		return err
 	}
 
-	logrus.WithFields(logrus.Fields{
+	doneFields := logrus.Fields{
 		"component": "runner",
 		"workload":  workload,
-	}).Info("workload run completed successfully")
+	}
+	if requestID, ok := RequestIDFromContext(ctx); ok {
+		doneFields["request_id"] = requestID
+	}
+	logrus.WithFields(doneFields).Info("workload run completed successfully")
 	return nil
 }
 
