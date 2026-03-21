@@ -44,19 +44,29 @@ func (g *gatusHandler) notify(success bool, message string) {
 	token := g.cfg.GatusToken
 	if token == "" {
 		if value, err := g.tokenFromFunction(name); err != nil {
-			logrus.Warnf("gatus token lookup failed: %v", err)
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "reconciler",
+				"workload":  g.workload,
+			}).Warn("gatus token lookup failed")
 		} else if value != "" {
 			token = value
 		}
 	}
 
 	if url == "" || token == "" {
-		logrus.Info("gatus not configured - not notifying Gatus")
+		logrus.WithFields(logrus.Fields{
+			"component": "reconciler",
+			"workload":  g.workload,
+		}).Info("gatus not configured; skipping notification")
 		return
 	}
 
 	if err := pushGatus(url, token, key, success, message); err != nil {
-		logrus.Warnf("gatus push failed: %v", err)
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "reconciler",
+			"workload":  g.workload,
+			"success":   success,
+		}).Warn("gatus push failed")
 	}
 }
 

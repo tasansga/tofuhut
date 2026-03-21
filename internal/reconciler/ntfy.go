@@ -35,7 +35,10 @@ func notifyNtfy(cfg Config, workload, planTextPath string) {
 		WorkloadToken: cfg.WorkloadToken,
 	}
 	if err := postNtfy(ncfg, workload, planTextPath); err != nil {
-		logrus.Warnf("ntfy notification failed: %v", err)
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "reconciler",
+			"workload":  workload,
+		}).Warn("ntfy notification failed")
 	}
 }
 

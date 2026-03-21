@@ -69,8 +69,9 @@ func (s *Scheduler) Wait() {
 func (s *Scheduler) runWorkload(ctx context.Context, spec WorkloadSpec) {
 	defer s.wg.Done()
 	logrus.WithFields(logrus.Fields{
-		"workload": spec.Name,
-		"interval": spec.Interval.String(),
+		"component": "scheduler",
+		"workload":  spec.Name,
+		"interval":  spec.Interval.String(),
 	}).Info("scheduler started")
 
 	first := true
@@ -90,15 +91,16 @@ func (s *Scheduler) runWorkload(ctx context.Context, spec WorkloadSpec) {
 		err := s.runner.Run(ctx, spec.Name)
 		latency := time.Since(start)
 		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"workload": spec.Name,
-				"latency":  latency.String(),
-				"error":    err.Error(),
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "scheduler",
+				"workload":  spec.Name,
+				"latency":   latency.String(),
 			}).Warn("scheduled workload run failed")
 		} else {
 			logrus.WithFields(logrus.Fields{
-				"workload": spec.Name,
-				"latency":  latency.String(),
+				"component": "scheduler",
+				"workload":  spec.Name,
+				"latency":   latency.String(),
 			}).Info("scheduled workload run completed")
 		}
 

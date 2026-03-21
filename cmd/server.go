@@ -75,7 +75,10 @@ var serverRunCmd = &cobra.Command{
 
 		errCh := make(chan error, 1)
 		go func() {
-			logrus.Infof("server listening on %s", listen)
+			logrus.WithFields(logrus.Fields{
+				"component": "server",
+				"listen":    listen,
+			}).Info("server listening")
 			errCh <- server.ListenAndServe()
 		}()
 
@@ -123,14 +126,14 @@ var serverRunCmd = &cobra.Command{
 					case <-ctx.Done():
 						return
 					case <-hupCh:
-						logrus.Info("reload requested; rescanning workloads")
+						logrus.WithField("component", "server").Info("reload requested; rescanning workloads")
 					case <-ticker.C:
-						logrus.Info("rescan interval reached; rescanning workloads")
+						logrus.WithField("component", "server").Info("rescan interval reached; rescanning workloads")
 					}
 
 					specs, err := loadValidWorkloads(defaultInterval, cfg, locks)
 					if err != nil {
-						logrus.WithError(err).Warn("failed to rescan workloads")
+						logrus.WithError(err).WithField("component", "server").Warn("failed to rescan workloads")
 						continue
 					}
 					dispatcher.DisableExcept(workloadsSet(specs))
@@ -150,7 +153,7 @@ var serverRunCmd = &cobra.Command{
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			logrus.WithError(err).Warn("server shutdown failed")
+			logrus.WithError(err).WithField("component", "server").Warn("server shutdown failed")
 		}
 		dispatcher.Stop()
 		schedMu.Lock()
@@ -206,8 +209,9 @@ func (h *serverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logrus.WithFields(logrus.Fields{
-		"method": r.Method,
-		"path":   r.URL.Path,
+		"component": "api",
+		"method":    r.Method,
+		"path":      r.URL.Path,
 	}).Warn("request rejected: not found")
 	w.WriteHeader(http.StatusNotFound)
 }
@@ -215,8 +219,9 @@ func (h *serverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, start time.Time) {
 	if r.Method != http.MethodPost {
 		logrus.WithFields(logrus.Fields{
-			"method": r.Method,
-			"path":   r.URL.Path,
+			"component": "api",
+			"method":    r.Method,
+			"path":      r.URL.Path,
 		}).Warn("approve request rejected: method not allowed")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -225,14 +230,16 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 	workload := strings.TrimPrefix(r.URL.Path, "/approve/")
 	if workload == "" || strings.Contains(workload, "/") {
 		logrus.WithFields(logrus.Fields{
-			"path": r.URL.Path,
+			"component": "api",
+			"path":      r.URL.Path,
 		}).Warn("approve request rejected: invalid workload path")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if err := validateWorkloadName(workload); err != nil {
 		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+			"component": "api",
+			"workload":  workload,
 		}).Warn("approve request rejected: invalid workload name")
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -240,8 +247,9 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 
 	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "api",
+			"workload":  workload,
 		}).Error("approve request failed: env token lookup error")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -249,7 +257,8 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 	if mergedCfg.WorkloadToken != "" {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer "+mergedCfg.WorkloadToken {
 			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+				"component": "api",
+				"workload":  workload,
 			}).Warn("approve request rejected: unauthorized")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -260,13 +269,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 	if _, err := os.Stat(workdir); err != nil {
 		if os.IsNotExist(err) {
 			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+				"component": "api",
+				"workload":  workload,
 			}).Warn("approve request rejected: workload directory not found")
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "api",
+			"workload":  workload,
 		}).Error("approve request failed: workload directory stat error")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -278,13 +289,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		if _, err := os.Stat(playbookPath); err != nil {
 			if os.IsNotExist(err) {
 				logrus.WithFields(logrus.Fields{
-					"workload": workload,
+					"component": "api",
+					"workload":  workload,
 				}).Warn("approve request rejected: playbook not found")
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
-			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
 			}).Error("approve request failed: playbook stat error")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -293,13 +306,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		if _, err := os.Stat(approvePendingPath); err != nil {
 			if os.IsNotExist(err) {
 				logrus.WithFields(logrus.Fields{
-					"workload": workload,
+					"component": "api",
+					"workload":  workload,
 				}).Warn("approve request rejected: no pending approval")
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
-			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
 			}).Error("approve request failed: pending approval stat error")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -309,13 +324,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		if _, err := os.Stat(dnsConfigPath); err != nil {
 			if os.IsNotExist(err) {
 				logrus.WithFields(logrus.Fields{
-					"workload": workload,
+					"component": "api",
+					"workload":  workload,
 				}).Warn("approve request rejected: dnsconfig not found")
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
-			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
 			}).Error("approve request failed: dnsconfig stat error")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -324,13 +341,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		if _, err := os.Stat(approvePendingPath); err != nil {
 			if os.IsNotExist(err) {
 				logrus.WithFields(logrus.Fields{
-					"workload": workload,
+					"component": "api",
+					"workload":  workload,
 				}).Warn("approve request rejected: no pending approval")
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
-			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
 			}).Error("approve request failed: pending approval stat error")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -340,13 +359,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		if _, err := os.Stat(planPath); err != nil {
 			if os.IsNotExist(err) {
 				logrus.WithFields(logrus.Fields{
-					"workload": workload,
+					"component": "api",
+					"workload":  workload,
 				}).Warn("approve request rejected: plan not found")
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
-			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
 			}).Error("approve request failed: plan stat error")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -355,17 +376,19 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 
 	approvePath := filepath.Join(workdir, "approve")
 	if err := os.WriteFile(approvePath, []byte("approved"), 0600); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "api",
+			"workload":  workload,
 		}).Error("approve request failed: write approve file")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"workload": workload,
-		"path":     approvePath,
-		"latency":  time.Since(start).String(),
+		"component": "api",
+		"workload":  workload,
+		"path":      approvePath,
+		"latency":   time.Since(start).String(),
 	}).Info("approval recorded")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
@@ -374,14 +397,15 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, start time.Time) {
 	if r.Method != http.MethodPost {
 		logrus.WithFields(logrus.Fields{
-			"method": r.Method,
-			"path":   r.URL.Path,
+			"component": "api",
+			"method":    r.Method,
+			"path":      r.URL.Path,
 		}).Warn("reconcile request rejected: method not allowed")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	if h.dispatcher == nil {
-		logrus.Error("reconcile request failed: no dispatcher configured")
+		logrus.WithField("component", "api").Error("reconcile request failed: no dispatcher configured")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -389,14 +413,16 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 	workload := strings.TrimPrefix(r.URL.Path, "/reconcile/")
 	if workload == "" || strings.Contains(workload, "/") {
 		logrus.WithFields(logrus.Fields{
-			"path": r.URL.Path,
+			"component": "api",
+			"path":      r.URL.Path,
 		}).Warn("reconcile request rejected: invalid workload path")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if err := validateWorkloadName(workload); err != nil {
 		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+			"component": "api",
+			"workload":  workload,
 		}).Warn("reconcile request rejected: invalid workload name")
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -404,8 +430,9 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 
 	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "api",
+			"workload":  workload,
 		}).Error("reconcile request failed: env token lookup error")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -413,7 +440,8 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 	if mergedCfg.WorkloadToken != "" {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer "+mergedCfg.WorkloadToken {
 			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+				"component": "api",
+				"workload":  workload,
 			}).Warn("reconcile request rejected: unauthorized")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -424,22 +452,24 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 	if _, err := os.Stat(workdir); err != nil {
 		if os.IsNotExist(err) {
 			logrus.WithFields(logrus.Fields{
-				"workload": workload,
+				"component": "api",
+				"workload":  workload,
 			}).Warn("reconcile request rejected: workload directory not found")
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "api",
+			"workload":  workload,
 		}).Error("reconcile request failed: workload directory stat error")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if err := h.dispatcher.Trigger(h.ctx, workload); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"workload": workload,
-			"error":    err.Error(),
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"component": "api",
+			"workload":  workload,
 		}).Warn("reconcile request rejected")
 		switch err {
 		case errWorkloadDisabled:
@@ -451,8 +481,9 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"workload": workload,
-		"latency":  time.Since(start).String(),
+		"component": "api",
+		"workload":  workload,
+		"latency":   time.Since(start).String(),
 	}).Info("manual reconcile queued")
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("accepted"))
@@ -656,16 +687,17 @@ func (d *dispatcher) startWorkerLocked(workload string, queue *workloadQueue) {
 			}
 			d.mu.Unlock()
 			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"workload": workload,
-					"latency":  time.Since(runStart).String(),
-					"error":    err.Error(),
+				logrus.WithError(err).WithFields(logrus.Fields{
+					"component": "server",
+					"workload":  workload,
+					"latency":   time.Since(runStart).String(),
 				}).Warn("reconcile failed")
 				continue
 			}
 			logrus.WithFields(logrus.Fields{
-				"workload": workload,
-				"latency":  time.Since(runStart).String(),
+				"component": "server",
+				"workload":  workload,
+				"latency":   time.Since(runStart).String(),
 			}).Info("reconcile completed")
 		}
 	}()
@@ -730,7 +762,7 @@ func loadValidWorkloads(defaultInterval time.Duration, cfg reconciler.Config, lo
 
 	valid, problems := filterValidWorkloads(specs, cfg, locks)
 	for _, problem := range problems {
-		logrus.Warn(problem)
+		logrus.WithField("component", "server").Warn(problem)
 	}
 	return valid, nil
 }

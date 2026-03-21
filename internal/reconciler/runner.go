@@ -40,8 +40,10 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 	}
 
 	logrus.WithFields(logrus.Fields{
+		"component":       "runner",
 		"workload":        workload,
 		"mode":            mergedConfig.Mode,
+		"workload_type":   mergedConfig.WorkloadType,
 		"upgrade":         mergedConfig.Upgrade,
 		"reconfigure":     mergedConfig.Reconfigure,
 		"gatus_cli_url":   mergedConfig.GatusURL,
@@ -52,7 +54,10 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 		return err
 	}
 
-	logrus.WithField("workload", workload).Info("workload run completed successfully")
+	logrus.WithFields(logrus.Fields{
+		"component": "runner",
+		"workload":  workload,
+	}).Info("workload run completed successfully")
 	return nil
 }
 

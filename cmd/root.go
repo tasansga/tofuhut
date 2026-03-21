@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"tofuhut/internal/reconciler"
 )
@@ -14,6 +17,13 @@ var rootCmd = &cobra.Command{
 	Version:       buildVersion(),
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		level, format, err := resolveLoggingConfig(cmd)
+		if err != nil {
+			return err
+		}
+		return configureLogging(level, format)
+	},
 }
 
 // Execute runs the root command.
@@ -43,8 +53,49 @@ func (e *ExitCodeError) Unwrap() error {
 
 func init() {
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
+	rootCmd.PersistentFlags().String("log-level", "", "Log level (debug, info, warn, error, fatal, panic) (env LOG_LEVEL; default info)")
+	rootCmd.PersistentFlags().String("log-format", "", "Log format (text or json) (env LOG_FORMAT; default text)")
 
 	rootCmd.AddCommand(workloadCmd)
+}
+
+func resolveLoggingConfig(cmd *cobra.Command) (string, string, error) {
+	level, _ := resolveString(cmd, "log-level", "LOG_LEVEL")
+	format, _ := resolveString(cmd, "log-format", "LOG_FORMAT")
+
+	if level == "" {
+		level = "info"
+	}
+	if format == "" {
+		format = "text"
+	}
+
+	level = strings.ToLower(strings.TrimSpace(level))
+	format = strings.ToLower(strings.TrimSpace(format))
+
+	if _, err := logrus.ParseLevel(level); err != nil {
+		return "", "", fmt.Errorf("invalid log level %q", level)
+	}
+	if format != "text" && format != "json" {
+		return "", "", fmt.Errorf("invalid log format %q: must be text or json", format)
+	}
+
+	return level, format, nil
+}
+
+func configureLogging(level, format string) error {
+	parsed, err := logrus.ParseLevel(level)
+	if err != nil {
+		return fmt.Errorf("invalid log level %q", level)
+	}
+	logrus.SetLevel(parsed)
+
+	if format == "json" {
+		logrus.SetFormatter(&logrus.JSONFormatter{})
+		return nil
+	}
+	logrus.SetFormatter(&logrus.TextFormatter{})
+	return nil
 }
 
 func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLocks, error) {

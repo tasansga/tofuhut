@@ -18,6 +18,11 @@ Run approval/reconciliation server:
 
 - `tofuhut server run --listen :8080`
 
+Set logging at runtime:
+
+- `tofuhut --log-level debug workload run <name>`
+- `tofuhut --log-format json server run`
+
 ## Workload Layout
 
 - Working directory: `/var/lib/tofuhut/workloads/<workload>`
@@ -39,6 +44,8 @@ Common:
 - `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
 - `APPROVE_URL`, `WORKLOAD_TOKEN`
 - `RECONCILE_ENABLED`, `RECONCILE_INTERVAL` (scheduler)
+- `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, `fatal`, `panic`; default `info`)
+- `LOG_FORMAT` (`text` or `json`; default `text`)
 
 Tofu-specific:
 

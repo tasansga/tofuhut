@@ -43,8 +43,10 @@ var workloadRunCmd = &cobra.Command{
 		}
 
 		logrus.WithFields(logrus.Fields{
+			"component":       "runner",
 			"workload":        name,
 			"mode":            mergedConfig.Mode,
+			"workload_type":   mergedConfig.WorkloadType,
 			"upgrade":         mergedConfig.Upgrade,
 			"reconfigure":     mergedConfig.Reconfigure,
 			"gatus_cli_url":   mergedConfig.GatusURL,
@@ -52,13 +54,19 @@ var workloadRunCmd = &cobra.Command{
 		}).Debug("starting workload run")
 
 		if err := reconciler.Run(name, mergedConfig, envFile, envFromFile); err != nil {
-			logrus.Error(err)
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"component": "runner",
+				"workload":  name,
+			}).Error("workload run failed")
 			if exitErr, ok := err.(*reconciler.ExitCodeError); ok {
 				return &ExitCodeError{Code: exitErr.Code, Err: exitErr}
 			}
 			return &ExitCodeError{Code: 1, Err: err}
 		}
-		logrus.WithField("workload", name).Info("workload run completed successfully")
+		logrus.WithFields(logrus.Fields{
+			"component": "runner",
+			"workload":  name,
+		}).Info("workload run completed successfully")
 		return nil
 	},
 }
