@@ -15,11 +15,12 @@ type Runner interface {
 type DefaultRunner struct {
 	BaseConfig Config
 	Locks      ConfigLocks
+	Paths      Paths
 }
 
 // NewDefaultRunner builds a runner using resolved config and locks.
-func NewDefaultRunner(cfg Config, locks ConfigLocks) *DefaultRunner {
-	return &DefaultRunner{BaseConfig: cfg, Locks: locks}
+func NewDefaultRunner(cfg Config, locks ConfigLocks, paths Paths) *DefaultRunner {
+	return &DefaultRunner{BaseConfig: cfg, Locks: locks, Paths: paths}
 }
 
 // Run executes a single reconciliation run for the workload.
@@ -28,7 +29,7 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 		return ctx.Err()
 	}
 
-	envFile := EnvFilePath(workload)
+	envFile := r.Paths.EnvFilePath(workload)
 	envFromFile, err := LoadEnvFile(envFile)
 	if err != nil {
 		return err
@@ -54,7 +55,7 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 	}
 	logrus.WithFields(startFields).Debug("starting workload run")
 
-	if err := RunWithContext(ctx, workload, mergedConfig, envFile, envFromFile); err != nil {
+	if err := RunWithContext(ctx, workload, mergedConfig, envFile, envFromFile, r.Paths); err != nil {
 		return err
 	}
 

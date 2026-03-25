@@ -26,7 +26,18 @@ var workloadRunCmd = &cobra.Command{
 			return &ExitCodeError{Code: 1, Err: fmt.Errorf("invalid workload name: %w", err)}
 		}
 
-		envFile := reconciler.EnvFilePath(name)
+		paths, err := resolvePaths(cmd)
+		if err != nil {
+			return &ExitCodeError{Code: 2, Err: err}
+		}
+		logrus.WithFields(logrus.Fields{
+			"component":   "runner",
+			"workload":    name,
+			"config_dir":  paths.ConfigDir,
+			"runtime_dir": paths.RuntimeDir,
+		}).Debug("resolved workload paths")
+
+		envFile := paths.EnvFilePath(name)
 		envFromFile, err := reconciler.LoadEnvFile(envFile)
 		if err != nil {
 			return &ExitCodeError{Code: 1, Err: err}
@@ -53,7 +64,7 @@ var workloadRunCmd = &cobra.Command{
 			"gatus_has_token": mergedConfig.GatusToken != "",
 		}).Debug("starting workload run")
 
-		if err := reconciler.Run(name, mergedConfig, envFile, envFromFile); err != nil {
+		if err := reconciler.Run(name, mergedConfig, envFile, envFromFile, paths); err != nil {
 			logrus.WithError(err).WithFields(logrus.Fields{
 				"component": "runner",
 				"workload":  name,
@@ -84,4 +95,6 @@ func init() {
 	workloadRunCmd.Flags().String("mode", "", "Run mode: plan, apply, or auto-apply (env MODE)")
 	workloadRunCmd.Flags().Bool("upgrade", false, "Pass -upgrade to tofu init (env UPGRADE)")
 	workloadRunCmd.Flags().Bool("reconfigure", false, "Pass -reconfigure to tofu init (env RECONFIGURE)")
+	workloadRunCmd.Flags().String("workload-config-dir", "", "Workload env/config directory (env TOFUHUT_WORKLOAD_CONFIG_DIR; default /etc/tofuhut/workloads)")
+	workloadRunCmd.Flags().String("workload-runtime-dir", "", "Workload runtime directory (env TOFUHUT_WORKLOAD_RUNTIME_DIR; default /var/lib/tofuhut/workloads)")
 }

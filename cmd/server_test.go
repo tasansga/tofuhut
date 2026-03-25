@@ -19,17 +19,17 @@ type fakeRunner struct {
 	workload string
 }
 
-func setupEnvDir(t *testing.T) string {
+func makePaths(t *testing.T) reconciler.Paths {
 	t.Helper()
-	envBase := t.TempDir()
-	restore := reconciler.SetEnvDirForTests(envBase)
-	t.Cleanup(restore)
-	return envBase
+	return reconciler.Paths{
+		ConfigDir:  t.TempDir(),
+		RuntimeDir: t.TempDir(),
+	}
 }
 
-func writeWorkloadEnv(t *testing.T, envBase, workload, content string) {
+func writeWorkloadEnv(t *testing.T, paths reconciler.Paths, workload, content string) {
 	t.Helper()
-	envFile := filepath.Join(envBase, workload+".env")
+	envFile := filepath.Join(paths.ConfigDir, workload+".env")
 	assert.NoError(t, os.WriteFile(envFile, []byte(content), 0644))
 }
 
@@ -61,27 +61,24 @@ func (r *fakeRunner) Run(ctx context.Context, workload string) error {
 }
 
 func TestApproveServerRejectsMissingPlan(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	envBase := setupEnvDir(t)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
-	writeWorkloadEnv(t, envBase, "demo", "WORKLOAD_TYPE=tofu\n")
+	writeWorkloadEnv(t, paths, "demo", "WORKLOAD_TYPE=tofu\n")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 	req.Header.Set("Authorization", "Bearer token")
 
-	h := newServerHandler(reconciler.Config{WorkloadType: "tofu", WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{WorkloadType: "tofu", WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
 func TestServeHTTPSetsRequestIDHeader(t *testing.T) {
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, makePaths(t))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/unknown", nil)
 
@@ -92,71 +89,58 @@ func TestServeHTTPSetsRequestIDHeader(t *testing.T) {
 }
 
 func TestApproveServerAllowsAnsibleWithoutPlan(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	envBase := t.TempDir()
-	restoreEnv := reconciler.SetEnvDirForTests(envBase)
-	t.Cleanup(restoreEnv)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "playbook.yml"), []byte("ok"), 0644))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "approve.pending"), []byte("pending"), 0600))
 
-	envFile := filepath.Join(envBase, "demo.env")
+	envFile := filepath.Join(paths.ConfigDir, "demo.env")
 	assert.NoError(t, os.WriteFile(envFile, []byte("WORKLOAD_TYPE=ansible\nWORKLOAD_TOKEN=token\n"), 0644))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 	req.Header.Set("Authorization", "Bearer token")
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestApproveServerAllowsDNSControlWithoutPlan(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	envBase := t.TempDir()
-	restoreEnv := reconciler.SetEnvDirForTests(envBase)
-	t.Cleanup(restoreEnv)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "approve.pending"), []byte("pending"), 0600))
 
-	envFile := filepath.Join(envBase, "demo.env")
+	envFile := filepath.Join(paths.ConfigDir, "demo.env")
 	assert.NoError(t, os.WriteFile(envFile, []byte("WORKLOAD_TYPE=dnscontrol\nWORKLOAD_TOKEN=token\n"), 0644))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 	req.Header.Set("Authorization", "Bearer token")
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestReconcileStartsWorkload(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	envBase := setupEnvDir(t)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
-	writeWorkloadEnv(t, envBase, "demo", "WORKLOAD_TYPE=tofu\n")
+	writeWorkloadEnv(t, paths, "demo", "WORKLOAD_TYPE=tofu\n")
 
 	runner := newFakeRunner(false)
 	dispatcher := newDispatcher(runner, context.Background())
 	t.Cleanup(dispatcher.Stop)
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, dispatcher)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, dispatcher, paths)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/reconcile/demo", nil)
@@ -172,19 +156,16 @@ func TestReconcileStartsWorkload(t *testing.T) {
 }
 
 func TestReconcileRejectsUnauthorized(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	envBase := setupEnvDir(t)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
-	writeWorkloadEnv(t, envBase, "demo", "WORKLOAD_TYPE=tofu\n")
+	writeWorkloadEnv(t, paths, "demo", "WORKLOAD_TYPE=tofu\n")
 
 	runner := newFakeRunner(false)
 	dispatcher := newDispatcher(runner, context.Background())
 	t.Cleanup(dispatcher.Stop)
-	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, dispatcher)
+	h := newServerHandler(reconciler.Config{WorkloadToken: "token"}, reconciler.ConfigLocks{}, dispatcher, paths)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/reconcile/demo", nil)
@@ -194,19 +175,16 @@ func TestReconcileRejectsUnauthorized(t *testing.T) {
 }
 
 func TestReconcileReturnsLockedWhenRunning(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	envBase := setupEnvDir(t)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
-	writeWorkloadEnv(t, envBase, "demo", "WORKLOAD_TYPE=tofu\n")
+	writeWorkloadEnv(t, paths, "demo", "WORKLOAD_TYPE=tofu\n")
 
 	runner := newFakeRunner(true)
 	dispatcher := newDispatcher(runner, context.Background())
 	t.Cleanup(dispatcher.Stop)
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, dispatcher)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, dispatcher, paths)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/reconcile/demo", nil)
@@ -224,11 +202,9 @@ func TestReconcileReturnsLockedWhenRunning(t *testing.T) {
 }
 
 func TestApproveServerWritesApproveFile(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "plan.tfplan"), []byte("plan"), 0600))
 
@@ -236,7 +212,7 @@ func TestApproveServerWritesApproveFile(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 	req.Header.Set("Authorization", "Bearer token")
 
-	h := newServerHandler(reconciler.Config{WorkloadType: "tofu", WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{WorkloadType: "tofu", WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	approvePath := filepath.Join(workdir, "approve")
@@ -245,88 +221,75 @@ func TestApproveServerWritesApproveFile(t *testing.T) {
 }
 
 func TestApproveServerUnauthorized(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "plan.tfplan"), []byte("plan"), 0600))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 
-	h := newServerHandler(reconciler.Config{WorkloadType: "tofu", WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{WorkloadType: "tofu", WorkloadToken: "token"}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestApproveServerAllowsWithoutToken(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "plan.tfplan"), []byte("plan"), 0600))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 
-	h := newServerHandler(reconciler.Config{WorkloadType: "tofu"}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{WorkloadType: "tofu"}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestApproveServerRejectsInvalidWorkload(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	_ = setupEnvDir(t)
+	paths := makePaths(t)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/../bad", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestApproveServerRejectsDotWorkloads(t *testing.T) {
-	base := t.TempDir()
-	restore := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restore)
-	_ = setupEnvDir(t)
+	paths := makePaths(t)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/..", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestApproveServerUsesTokenFromEnvFile(t *testing.T) {
-	base := t.TempDir()
-	restoreWorkDir := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restoreWorkDir)
-	envBase := setupEnvDir(t)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "plan.tfplan"), []byte("plan"), 0600))
 
-	envFile := filepath.Join(envBase, "demo.env")
+	envFile := filepath.Join(paths.ConfigDir, "demo.env")
 	assert.NoError(t, os.WriteFile(envFile, []byte("WORKLOAD_TYPE=tofu\nWORKLOAD_TOKEN=envtoken\n"), 0644))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/approve/demo", nil)
 
-	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil)
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, paths)
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
@@ -338,16 +301,13 @@ func TestApproveServerUsesTokenFromEnvFile(t *testing.T) {
 }
 
 func TestApproveServerUsesLockedTokenOverEnv(t *testing.T) {
-	base := t.TempDir()
-	restoreWorkDir := reconciler.SetWorkDirBaseForTests(base)
-	t.Cleanup(restoreWorkDir)
-	envBase := setupEnvDir(t)
+	paths := makePaths(t)
 
-	workdir := filepath.Join(base, "demo")
+	workdir := filepath.Join(paths.RuntimeDir, "demo")
 	assert.NoError(t, os.MkdirAll(workdir, 0755))
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "plan.tfplan"), []byte("plan"), 0600))
 
-	envFile := filepath.Join(envBase, "demo.env")
+	envFile := filepath.Join(paths.ConfigDir, "demo.env")
 	assert.NoError(t, os.WriteFile(envFile, []byte("WORKLOAD_TYPE=tofu\nWORKLOAD_TOKEN=envtoken\n"), 0644))
 
 	rec := httptest.NewRecorder()
@@ -356,7 +316,7 @@ func TestApproveServerUsesLockedTokenOverEnv(t *testing.T) {
 
 	cfg := reconciler.Config{WorkloadToken: "locked"}
 	locks := reconciler.ConfigLocks{WorkloadToken: true}
-	h := newServerHandler(cfg, locks, nil)
+	h := newServerHandler(cfg, locks, nil, paths)
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 

@@ -57,14 +57,24 @@ var serverRunCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		paths, err := resolvePaths(cmd)
+		if err != nil {
+			return err
+		}
+		logrus.WithFields(logrus.Fields{
+			"component":    "server",
+			"config_dir":   paths.ConfigDir,
+			"runtime_dir":  paths.RuntimeDir,
+			"scheduler_on": enableScheduler,
+		}).Info("resolved workload paths")
 
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 
 		cfg := reconciler.Config{}
 		locks := reconciler.ConfigLocks{}
-		dispatcher := newDispatcher(reconciler.NewDefaultRunner(cfg, locks), ctx)
-		handler := newServerHandler(cfg, locks, dispatcher)
+		dispatcher := newDispatcher(reconciler.NewDefaultRunner(cfg, locks, paths), ctx)
+		handler := newServerHandler(cfg, locks, dispatcher, paths)
 		handler.(*serverHandler).ctx = ctx
 		server := &http.Server{
 			Addr:              listen,
@@ -112,7 +122,7 @@ var serverRunCmd = &cobra.Command{
 		}
 
 		if enableScheduler {
-			specs, err := loadValidWorkloads(defaultInterval, cfg, locks)
+			specs, err := loadValidWorkloads(defaultInterval, cfg, locks, paths)
 			if err != nil {
 				return err
 			}
@@ -134,7 +144,7 @@ var serverRunCmd = &cobra.Command{
 						logrus.WithField("component", "server").Info("rescan interval reached; rescanning workloads")
 					}
 
-					specs, err := loadValidWorkloads(defaultInterval, cfg, locks)
+					specs, err := loadValidWorkloads(defaultInterval, cfg, locks, paths)
 					if err != nil {
 						logrus.WithError(err).WithField("component", "server").Warn("failed to rescan workloads")
 						continue
@@ -176,6 +186,8 @@ func init() {
 	serverRunCmd.Flags().Duration("scheduler-jitter", 0, "Add up to this much jitter to each interval")
 	serverRunCmd.Flags().Int("scheduler-max-concurrent", 2, "Maximum concurrent reconciliations (0 = unlimited)")
 	serverRunCmd.Flags().Duration("scheduler-rescan-interval", 5*time.Minute, "Rescan workloads on this interval (0 = disable)")
+	serverRunCmd.Flags().String("workload-config-dir", "", "Workload env/config directory (env TOFUHUT_WORKLOAD_CONFIG_DIR; default /etc/tofuhut/workloads)")
+	serverRunCmd.Flags().String("workload-runtime-dir", "", "Workload runtime directory (env TOFUHUT_WORKLOAD_RUNTIME_DIR; default /var/lib/tofuhut/workloads)")
 	serverCmd.AddCommand(serverRunCmd)
 	rootCmd.AddCommand(serverCmd)
 }
@@ -184,14 +196,16 @@ type serverHandler struct {
 	cfg        reconciler.Config
 	locks      reconciler.ConfigLocks
 	dispatcher *dispatcher
+	paths      reconciler.Paths
 	ctx        context.Context
 }
 
-func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, dispatcher *dispatcher) http.Handler {
+func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, dispatcher *dispatcher, paths reconciler.Paths) http.Handler {
 	return &serverHandler{
 		cfg:        cfg,
 		locks:      locks,
 		dispatcher: dispatcher,
+		paths:      paths,
 		ctx:        context.Background(),
 	}
 }
@@ -254,7 +268,7 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		return
 	}
 
-	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks)
+	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks, h.paths)
 	if err != nil {
 		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
 			"component": "api",
@@ -274,7 +288,7 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		}
 	}
 
-	workdir := reconciler.WorkDirPath(workload)
+	workdir := h.paths.WorkDirPath(workload)
 	if _, err := os.Stat(workdir); err != nil {
 		if os.IsNotExist(err) {
 			logger(logrus.Fields{
@@ -443,7 +457,7 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks)
+	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks, h.paths)
 	if err != nil {
 		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
 			"component": "api",
@@ -463,7 +477,7 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	workdir := reconciler.WorkDirPath(workload)
+	workdir := h.paths.WorkDirPath(workload)
 	if _, err := os.Stat(workdir); err != nil {
 		if os.IsNotExist(err) {
 			logger(logrus.Fields{
@@ -768,8 +782,8 @@ func (r *triggerRunner) Run(ctx context.Context, workload string) error {
 	return r.dispatcher.TriggerSync(ctx, workload)
 }
 
-func workloadConfigFromEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks) (reconciler.Config, error) {
-	envFile := reconciler.EnvFilePath(workload)
+func workloadConfigFromEnv(workload string, cfg reconciler.Config, locks reconciler.ConfigLocks, paths reconciler.Paths) (reconciler.Config, error) {
+	envFile := paths.EnvFilePath(workload)
 	envFromFile, err := reconciler.LoadEnvFile(envFile)
 	if err != nil {
 		return reconciler.Config{}, err
@@ -793,27 +807,27 @@ func toSchedulerSpecs(specs []reconciler.WorkloadSpec) []scheduler.WorkloadSpec 
 	return out
 }
 
-func loadValidWorkloads(defaultInterval time.Duration, cfg reconciler.Config, locks reconciler.ConfigLocks) ([]reconciler.WorkloadSpec, error) {
-	specs, err := reconciler.LoadWorkloadSpecs(defaultInterval)
+func loadValidWorkloads(defaultInterval time.Duration, cfg reconciler.Config, locks reconciler.ConfigLocks, paths reconciler.Paths) ([]reconciler.WorkloadSpec, error) {
+	specs, err := reconciler.LoadWorkloadSpecs(defaultInterval, paths)
 	if err != nil {
 		return nil, err
 	}
 
-	valid, problems := filterValidWorkloads(specs, cfg, locks)
+	valid, problems := filterValidWorkloads(specs, cfg, locks, paths)
 	for _, problem := range problems {
 		logrus.WithField("component", "server").Warn(problem)
 	}
 	return valid, nil
 }
 
-func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config, locks reconciler.ConfigLocks) ([]reconciler.WorkloadSpec, []string) {
+func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config, locks reconciler.ConfigLocks, paths reconciler.Paths) ([]reconciler.WorkloadSpec, []string) {
 	var problems []string
 	valid := make([]reconciler.WorkloadSpec, 0, len(specs))
 	for _, spec := range specs {
 		if !spec.Enabled || spec.Interval <= 0 {
 			continue
 		}
-		envFile := reconciler.EnvFilePath(spec.Name)
+		envFile := paths.EnvFilePath(spec.Name)
 		envFromFile, err := reconciler.LoadEnvFile(envFile)
 		if err != nil {
 			problems = append(problems, spec.Name+": "+err.Error())

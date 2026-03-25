@@ -11,16 +11,16 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func setupFakeTofu(t *testing.T, dir string, script string) {
+func setupFakeTofu(t *testing.T, dir string, runtimeDir string, script string) {
 	t.Helper()
 	path := filepath.Join(dir, "tofu")
-	setupFakeTool(t, path, script)
+	setupFakeTool(t, path, runtimeDir, script)
 }
 
-func setupFakeTool(t *testing.T, path string, script string) {
+func setupFakeTool(t *testing.T, path string, runtimeDir string, script string) {
 	t.Helper()
 	if strings.Contains(script, "__TOFUHUT_PLAN_FILE__") {
-		planPath := filepath.Join(workDirBase, "workload", "plan.tfplan")
+		planPath := filepath.Join(runtimeDir, "workload", "plan.tfplan")
 		script = strings.ReplaceAll(script, "__TOFUHUT_PLAN_FILE__", planPath)
 	}
 	err := os.WriteFile(path, []byte(script), 0755)
@@ -41,20 +41,12 @@ func newWorkloadDir(t *testing.T, base string) string {
 	return base
 }
 
-func withTempDirs(t *testing.T) (string, string) {
+func withTempPaths(t *testing.T) Paths {
 	t.Helper()
-	oldWorkDirBase := workDirBase
-	oldEnvDir := envDir
-
-	workDirBase = t.TempDir()
-	envDir = t.TempDir()
-
-	t.Cleanup(func() {
-		workDirBase = oldWorkDirBase
-		envDir = oldEnvDir
-	})
-
-	return workDirBase, envDir
+	return Paths{
+		ConfigDir:  t.TempDir(),
+		RuntimeDir: t.TempDir(),
+	}
 }
 
 func TestRunPlanOnlyNoChanges(t *testing.T) {
@@ -62,16 +54,16 @@ func TestRunPlanOnlyNoChanges(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	planPath := filepath.Join(workdir, "plan.tfplan")
 
 	tmpBin := t.TempDir()
-	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
+	setupFakeTofu(t, tmpBin, paths.RuntimeDir, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
 
 	cfg := Config{WorkloadType: "tofu", Mode: "plan"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.NoFileExists(t, planPath)
 }
@@ -81,17 +73,17 @@ func TestRunApplyWritesPlanAndWaitsForApproval(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	planPath := filepath.Join(workdir, "plan.tfplan")
 	planTextPath := filepath.Join(workdir, "workload-plan.txt")
 
 	tmpBin := t.TempDir()
-	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then echo \"planned\"; touch \"__TOFUHUT_PLAN_FILE__\"; exit 2; fi\nexit 0\n")
+	setupFakeTofu(t, tmpBin, paths.RuntimeDir, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then echo \"planned\"; touch \"__TOFUHUT_PLAN_FILE__\"; exit 2; fi\nexit 0\n")
 
 	cfg := Config{WorkloadType: "tofu", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.FileExists(t, planTextPath)
 	assert.FileExists(t, planPath)
@@ -104,8 +96,8 @@ func TestRunApplyUsesApprovedPlan(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	planPath := filepath.Join(workdir, "plan.tfplan")
 	planTextPath := filepath.Join(workdir, "workload-plan.txt")
@@ -117,10 +109,10 @@ func TestRunApplyUsesApprovedPlan(t *testing.T) {
 	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0644))
 
 	tmpBin := t.TempDir()
-	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
+	setupFakeTofu(t, tmpBin, paths.RuntimeDir, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
 
 	cfg := Config{WorkloadType: "tofu", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 
 	assert.NoFileExists(t, planPath)
@@ -137,17 +129,17 @@ func TestRunApplyStaleApprovalRemoved(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	approvePath := filepath.Join(workdir, "approve")
 	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0644))
 
 	tmpBin := t.TempDir()
-	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
+	setupFakeTofu(t, tmpBin, paths.RuntimeDir, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 0; fi\nexit 0\n")
 
 	cfg := Config{WorkloadType: "tofu", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.NoFileExists(t, approvePath)
 }
@@ -157,16 +149,16 @@ func TestRunAutoApplyAppliesImmediately(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	applyLog := filepath.Join(workdir, "apply.log")
 
 	tmpBin := t.TempDir()
-	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 2; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
+	setupFakeTofu(t, tmpBin, paths.RuntimeDir, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then exit 2; fi\nif [ \"$1\" = \"apply\" ]; then echo \"apply $@\" >> \""+applyLog+"\"; exit 0; fi\nexit 0\n")
 
 	cfg := Config{WorkloadType: "tofu", Mode: "auto-apply"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 
 	data, err := os.ReadFile(applyLog)
@@ -179,17 +171,17 @@ func TestRunApplyNoChangesCleansPlanArtifacts(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	planPath := filepath.Join(workdir, "plan.tfplan")
 	planTextPath := filepath.Join(workdir, "workload-plan.txt")
 
 	tmpBin := t.TempDir()
-	setupFakeTofu(t, tmpBin, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then touch \"__TOFUHUT_PLAN_FILE__\"; exit 0; fi\nexit 0\n")
+	setupFakeTofu(t, tmpBin, paths.RuntimeDir, "#!/bin/sh\nif [ \"$1\" = \"init\" ]; then exit 0; fi\nif [ \"$1\" = \"plan\" ]; then touch \"__TOFUHUT_PLAN_FILE__\"; exit 0; fi\nexit 0\n")
 
 	cfg := Config{WorkloadType: "tofu", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.NoFileExists(t, planPath)
 	assert.NoFileExists(t, planTextPath)
@@ -200,18 +192,18 @@ func TestRunAnsiblePlanUsesCheck(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	playbookPath := filepath.Join(workdir, "playbook.yml")
 	assert.NoError(t, os.WriteFile(playbookPath, []byte("ok"), 0644))
 
 	tmpBin := t.TempDir()
 	logPath := filepath.Join(workdir, "ansible.log")
-	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), "#!/bin/sh\necho \"$@\" > \""+logPath+"\"\nexit 0\n")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"$@\" > \""+logPath+"\"\nexit 0\n")
 
 	cfg := Config{WorkloadType: "ansible", Mode: "plan"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 
 	data, err := os.ReadFile(logPath)
@@ -224,18 +216,18 @@ func TestRunAnsibleApplyRequiresApproval(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	playbookPath := filepath.Join(workdir, "playbook.yml")
 	assert.NoError(t, os.WriteFile(playbookPath, []byte("ok"), 0644))
 
 	tmpBin := t.TempDir()
 	logPath := filepath.Join(workdir, "ansible.log")
-	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), "#!/bin/sh\necho \"$@\" > \""+logPath+"\"\nexit 0\n")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"$@\" > \""+logPath+"\"\nexit 0\n")
 
 	cfg := Config{WorkloadType: "ansible", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.NoFileExists(t, logPath)
 }
@@ -245,18 +237,18 @@ func TestRunDNSControlPlanNoChanges(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
 	previewTextPath := filepath.Join(workdir, "workload-preview.txt")
 	previewReportPath := filepath.Join(workdir, "preview-report.json")
 
 	tmpBin := t.TempDir()
-	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns preview\"\necho '[{\"domain\":\"example.com\",\"corrections\":0}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), paths.RuntimeDir, "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns preview\"\necho '[{\"domain\":\"example.com\",\"corrections\":0}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
 
 	cfg := Config{WorkloadType: "dnscontrol", Mode: "plan"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.NoFileExists(t, previewTextPath)
 	assert.FileExists(t, previewReportPath)
@@ -267,8 +259,8 @@ func TestRunDNSControlApplyWritesPreviewAndWaitsForApproval(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
 	previewTextPath := filepath.Join(workdir, "workload-preview.txt")
@@ -276,10 +268,10 @@ func TestRunDNSControlApplyWritesPreviewAndWaitsForApproval(t *testing.T) {
 	approvePendingPath := filepath.Join(workdir, "approve.pending")
 
 	tmpBin := t.TempDir()
-	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns changes\"\necho '[{\"domain\":\"example.com\",\"corrections\":2}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), paths.RuntimeDir, "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns changes\"\necho '[{\"domain\":\"example.com\",\"corrections\":2}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
 
 	cfg := Config{WorkloadType: "dnscontrol", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.FileExists(t, previewTextPath)
 	assert.FileExists(t, previewReportPath)
@@ -294,8 +286,8 @@ func TestRunDNSControlApplyUsesApproval(t *testing.T) {
 		t.Skip("shell scripts are not supported on windows")
 	}
 
-	base, _ := withTempDirs(t)
-	workdir := filepath.Join(base, "workload")
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
 	newWorkloadDir(t, workdir)
 	assert.NoError(t, os.WriteFile(filepath.Join(workdir, "dnsconfig.js"), []byte("ok"), 0644))
 	previewTextPath := filepath.Join(workdir, "workload-preview.txt")
@@ -305,16 +297,16 @@ func TestRunDNSControlApplyUsesApproval(t *testing.T) {
 	pushLog := filepath.Join(workdir, "dnscontrol.log")
 
 	tmpBin := t.TempDir()
-	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns changes\"\necho '[{\"domain\":\"example.com\",\"corrections\":1}]' > \"$report\"\nexit 0\nfi\nif [ \"$cmd\" = \"push\" ]; then\necho \"push $@\" >> \""+pushLog+"\"\nexit 0\nfi\nexit 1\n")
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), paths.RuntimeDir, "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho \"dns changes\"\necho '[{\"domain\":\"example.com\",\"corrections\":1}]' > \"$report\"\nexit 0\nfi\nif [ \"$cmd\" = \"push\" ]; then\necho \"push $@\" >> \""+pushLog+"\"\nexit 0\nfi\nexit 1\n")
 
 	cfg := Config{WorkloadType: "dnscontrol", Mode: "apply", WorkloadToken: "token"}
-	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.FileExists(t, approvePendingPath)
 
 	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0600))
 
-	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{})
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
 	assert.NoError(t, err)
 	assert.NoFileExists(t, approvePath)
 	assert.NoFileExists(t, approvePendingPath)
@@ -334,7 +326,7 @@ func TestRunCommandEmptyEnvPreserved(t *testing.T) {
 	tmpDir := t.TempDir()
 	envLog := filepath.Join(tmpDir, "env.log")
 
-	setupFakeTofu(t, tmpDir, "#!/bin/sh\nenv > \""+envLog+"\"\nexit 0\n")
+	setupFakeTofu(t, tmpDir, tmpDir, "#!/bin/sh\nenv > \""+envLog+"\"\nexit 0\n")
 
 	_, err := runCommand(context.Background(), commandOptions{Env: []string{}}, "tofu")
 	assert.NoError(t, err)

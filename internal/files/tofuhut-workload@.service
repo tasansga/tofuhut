@@ -5,6 +5,6 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/var/lib/tofuhut/workloads/%i
-EnvironmentFile=-/etc/tofuhut/workloads/%i.env
+Environment=TOFUHUT_WORKLOAD_CONFIG_DIR=/etc/tofuhut/workloads
+Environment=TOFUHUT_WORKLOAD_RUNTIME_DIR=/var/lib/tofuhut/workloads
 ExecStart=tofuhut workload run %i

@@ -28,6 +28,16 @@ Set logging at runtime:
 - Working directory: `/var/lib/tofuhut/workloads/<workload>`
 - Env file: `/etc/tofuhut/workloads/<workload>.env`
 
+Directories can be overridden via flags or env vars. Defaults:
+
+- `workload config dir`: `/etc/tofuhut/workloads`
+- `workload runtime dir`: `/var/lib/tofuhut/workloads`
+
+Override using:
+
+- `TOFUHUT_WORKLOAD_CONFIG_DIR`
+- `TOFUHUT_WORKLOAD_RUNTIME_DIR`
+
 Required workload files:
 
 - `ansible`: `playbook.yml`
@@ -44,6 +54,8 @@ Common:
 - `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
 - `APPROVE_URL`, `WORKLOAD_TOKEN`
 - `RECONCILE_ENABLED`, `RECONCILE_INTERVAL` (scheduler)
+- `TOFUHUT_WORKLOAD_CONFIG_DIR` (optional; default `/etc/tofuhut/workloads`)
+- `TOFUHUT_WORKLOAD_RUNTIME_DIR` (optional; default `/var/lib/tofuhut/workloads`)
 - `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, `fatal`, `panic`; default `info`)
 - `LOG_FORMAT` (`text` or `json`; default `text`)
 

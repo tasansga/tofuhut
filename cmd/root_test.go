@@ -6,6 +6,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"tofuhut/internal/reconciler"
 )
 
 func newTestCmd() *cobra.Command {
@@ -15,6 +16,8 @@ func newTestCmd() *cobra.Command {
 	c.Flags().String("mode", "", "")
 	c.Flags().Bool("upgrade", false, "")
 	c.Flags().Bool("reconfigure", false, "")
+	c.Flags().String("workload-config-dir", "", "")
+	c.Flags().String("workload-runtime-dir", "", "")
 	return c
 }
 
@@ -63,6 +66,25 @@ func TestResolveBoolEnvParsing(t *testing.T) {
 	cfg, _, err := resolveConfig(cmd)
 	assert.NoError(t, err)
 	assert.True(t, cfg.Upgrade)
+}
+
+func TestResolvePathsFromEnv(t *testing.T) {
+	t.Setenv("TOFUHUT_WORKLOAD_CONFIG_DIR", "/etc/tofuhut/workloads")
+	t.Setenv("TOFUHUT_WORKLOAD_RUNTIME_DIR", "/var/lib/tofuhut/workloads")
+
+	cmd := newTestCmd()
+	paths, err := resolvePaths(cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, "/etc/tofuhut/workloads", paths.ConfigDir)
+	assert.Equal(t, "/var/lib/tofuhut/workloads", paths.RuntimeDir)
+}
+
+func TestResolvePathsDefaults(t *testing.T) {
+	cmd := newTestCmd()
+	paths, err := resolvePaths(cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, reconciler.DefaultWorkloadConfigDir, paths.ConfigDir)
+	assert.Equal(t, reconciler.DefaultWorkloadRuntimeDir, paths.RuntimeDir)
 }
 
 func newTestLoggingCmd() *cobra.Command {

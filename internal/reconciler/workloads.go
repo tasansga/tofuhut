@@ -18,10 +18,10 @@ type WorkloadSpec struct {
 }
 
 // LoadWorkloadSpecs discovers workloads and applies scheduling defaults.
-func LoadWorkloadSpecs(defaultInterval time.Duration) ([]WorkloadSpec, error) {
-	entries, err := os.ReadDir(workDirBase)
+func LoadWorkloadSpecs(defaultInterval time.Duration, paths Paths) ([]WorkloadSpec, error) {
+	entries, err := os.ReadDir(paths.RuntimeDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list workloads in %s: %w", workDirBase, err)
+		return nil, fmt.Errorf("failed to list workloads in %s: %w", paths.RuntimeDir, err)
 	}
 
 	specs := make([]WorkloadSpec, 0, len(entries))
@@ -34,7 +34,7 @@ func LoadWorkloadSpecs(defaultInterval time.Duration) ([]WorkloadSpec, error) {
 			continue
 		}
 
-		envFile := EnvFilePath(name)
+		envFile := paths.EnvFilePath(name)
 		envFromFile, err := LoadEnvFile(envFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load env for %s: %w", name, err)

@@ -15,36 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	defaultWorkDirBase = "/var/lib/tofuhut/workloads"
-	defaultEnvDir      = "/etc/tofuhut/workloads"
-)
-
-var (
-	workDirBase = defaultWorkDirBase
-	envDir      = defaultEnvDir
-)
-
-// SetWorkDirBaseForTests overrides the work dir base and returns a restore func.
-// Intended for tests only.
-func SetWorkDirBaseForTests(path string) func() {
-	old := workDirBase
-	workDirBase = path
-	return func() {
-		workDirBase = old
-	}
-}
-
-// SetEnvDirForTests overrides the env dir and returns a restore func.
-// Intended for tests only.
-func SetEnvDirForTests(path string) func() {
-	old := envDir
-	envDir = path
-	return func() {
-		envDir = old
-	}
-}
-
 // ExitCodeError is returned when a command should exit with a specific code.
 type ExitCodeError struct {
 	Code int
@@ -65,24 +35,14 @@ func (e *ExitCodeError) Unwrap() error {
 	return e.Err
 }
 
-// EnvFilePath returns the workload env file path.
-func EnvFilePath(workload string) string {
-	return filepath.Join(envDir, workload+".env")
-}
-
-// WorkDirPath returns the workload working directory path.
-func WorkDirPath(workload string) string {
-	return filepath.Join(workDirBase, workload)
-}
-
 // Run executes the reconciler flow for the given workload name.
-func Run(workload string, cfg Config, envFile string, envFromFile map[string]string) error {
-	return RunWithContext(context.Background(), workload, cfg, envFile, envFromFile)
+func Run(workload string, cfg Config, envFile string, envFromFile map[string]string, paths Paths) error {
+	return RunWithContext(context.Background(), workload, cfg, envFile, envFromFile, paths)
 }
 
 // RunWithContext executes the reconciler flow for the given workload name.
-func RunWithContext(ctx context.Context, workload string, cfg Config, envFile string, envFromFile map[string]string) error {
-	workdir := filepath.Join(workDirBase, workload)
+func RunWithContext(ctx context.Context, workload string, cfg Config, envFile string, envFromFile map[string]string, paths Paths) error {
+	workdir := paths.WorkDirPath(workload)
 	planTextPath := filepath.Join(workdir, fmt.Sprintf("%s-plan.txt", workload))
 	planFilePath := filepath.Join(workdir, "plan.tfplan")
 	approvePath := filepath.Join(workdir, "approve")

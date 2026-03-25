@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -135,6 +136,29 @@ func resolveConfig(cmd *cobra.Command) (reconciler.Config, reconciler.ConfigLock
 		WorkloadToken: workloadTokenLocked,
 	}
 	return cfg, locks, nil
+}
+
+func resolvePaths(cmd *cobra.Command) (reconciler.Paths, error) {
+	configDir, _ := resolveString(cmd, "workload-config-dir", "TOFUHUT_WORKLOAD_CONFIG_DIR")
+	runtimeDir, _ := resolveString(cmd, "workload-runtime-dir", "TOFUHUT_WORKLOAD_RUNTIME_DIR")
+
+	if configDir == "" {
+		configDir = reconciler.DefaultWorkloadConfigDir
+	}
+	if runtimeDir == "" {
+		runtimeDir = reconciler.DefaultWorkloadRuntimeDir
+	}
+
+	configDir = filepath.Clean(configDir)
+	runtimeDir = filepath.Clean(runtimeDir)
+	paths := reconciler.Paths{
+		ConfigDir:  configDir,
+		RuntimeDir: runtimeDir,
+	}
+	if err := paths.Validate(); err != nil {
+		return reconciler.Paths{}, err
+	}
+	return paths, nil
 }
 
 func resolveString(cmd *cobra.Command, flagName, envName string) (string, bool) {
