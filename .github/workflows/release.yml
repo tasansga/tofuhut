@@ -18,7 +18,7 @@ jobs:
           - runner: ubuntu-24.04
             arch: amd64
             os: linux
-          - runner: ubuntu-24.04-arm64
+          - runner: ubuntu-24.04-arm
             arch: arm64
             os: linux
           - runner: macos-14
@@ -33,11 +33,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26.1"
-      - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v6
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PASSPHRASE }}
       - name: Build tofuhut
         env:
           GOOS: ${{ matrix.os }}
