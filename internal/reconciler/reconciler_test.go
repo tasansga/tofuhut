@@ -232,6 +232,104 @@ func TestRunAnsibleApplyRequiresApproval(t *testing.T) {
 	assert.NoFileExists(t, logPath)
 }
 
+func TestRunAnsibleChangedOnlySkipsWhenUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
+	newWorkloadDir(t, workdir)
+	playbookPath := filepath.Join(workdir, "playbook.yml")
+	assert.NoError(t, os.WriteFile(playbookPath, []byte("ok"), 0644))
+
+	tmpBin := t.TempDir()
+	logPath := filepath.Join(workdir, "ansible.log")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"run\" >> \""+logPath+"\"\nexit 0\n")
+
+	cfg := Config{WorkloadType: "ansible", Mode: "plan", ReconcileChangedOnly: true}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 1)
+
+	assert.NoError(t, os.WriteFile(playbookPath, []byte("changed"), 0644))
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err = os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 2)
+}
+
+func TestRunAnsibleChangedOnlyForceContextBypassesSkip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
+	newWorkloadDir(t, workdir)
+	playbookPath := filepath.Join(workdir, "playbook.yml")
+	assert.NoError(t, os.WriteFile(playbookPath, []byte("ok"), 0644))
+
+	tmpBin := t.TempDir()
+	logPath := filepath.Join(workdir, "ansible.log")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"run\" >> \""+logPath+"\"\nexit 0\n")
+
+	cfg := Config{WorkloadType: "ansible", Mode: "plan", ReconcileChangedOnly: true}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	forceCtx := WithForceReconcile(context.Background(), true)
+	err = RunWithContext(forceCtx, "workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 2)
+}
+
+func TestRunAnsibleChangedOnlyApplyUsesApprovalDespiteUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
+	newWorkloadDir(t, workdir)
+	playbookPath := filepath.Join(workdir, "playbook.yml")
+	assert.NoError(t, os.WriteFile(playbookPath, []byte("ok"), 0644))
+	approvePath := filepath.Join(workdir, "approve")
+
+	tmpBin := t.TempDir()
+	logPath := filepath.Join(workdir, "ansible.log")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"run\" >> \""+logPath+"\"\nexit 0\n")
+
+	cfg := Config{WorkloadType: "ansible", Mode: "apply", WorkloadToken: "token", ReconcileChangedOnly: true}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+	assert.NoFileExists(t, logPath)
+
+	assert.NoError(t, os.WriteFile(approvePath, []byte("ok"), 0600))
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 1)
+}
+
 func TestRunDNSControlPlanNoChanges(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts are not supported on windows")
@@ -316,6 +414,42 @@ func TestRunDNSControlApplyUsesApproval(t *testing.T) {
 	data, err := os.ReadFile(pushLog)
 	assert.NoError(t, err)
 	assert.True(t, strings.Contains(string(data), "push"))
+}
+
+func TestRunDNSControlChangedOnlySkipsWhenUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
+	newWorkloadDir(t, workdir)
+	dnsConfigPath := filepath.Join(workdir, "dnsconfig.js")
+	assert.NoError(t, os.WriteFile(dnsConfigPath, []byte("ok"), 0644))
+
+	tmpBin := t.TempDir()
+	logPath := filepath.Join(workdir, "dnscontrol.log")
+	setupFakeTool(t, filepath.Join(tmpBin, "dnscontrol"), paths.RuntimeDir, "#!/bin/sh\ncmd=\"$1\"\nshift\nif [ \"$cmd\" = \"preview\" ]; then\necho \"preview\" >> \""+logPath+"\"\nreport=\"\"\nwhile [ $# -gt 0 ]; do\nif [ \"$1\" = \"--report\" ]; then\nshift\nreport=\"$1\"\nbreak\nfi\nshift\ndone\necho '[{\"domain\":\"example.com\",\"corrections\":0}]' > \"$report\"\nexit 0\nfi\nexit 1\n")
+
+	cfg := Config{WorkloadType: "dnscontrol", Mode: "plan", ReconcileChangedOnly: true}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 1)
+
+	assert.NoError(t, os.WriteFile(dnsConfigPath, []byte("changed"), 0644))
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err = os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 2)
 }
 
 func TestRunCommandEmptyEnvPreserved(t *testing.T) {

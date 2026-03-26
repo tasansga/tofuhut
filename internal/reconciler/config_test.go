@@ -65,3 +65,22 @@ func TestMergeConfigDNSControlWorkloadType(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "dnscontrol", merged.WorkloadType)
 }
+
+func TestMergeConfigReconcileChangedOnly(t *testing.T) {
+	env := map[string]string{
+		"WORKLOAD_TYPE":          "ansible",
+		"RECONCILE_CHANGED_ONLY": "true",
+	}
+	merged, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.NoError(t, err)
+	assert.True(t, merged.ReconcileChangedOnly)
+}
+
+func TestMergeConfigInvalidReconcileChangedOnly(t *testing.T) {
+	env := map[string]string{
+		"WORKLOAD_TYPE":          "ansible",
+		"RECONCILE_CHANGED_ONLY": "not-bool",
+	}
+	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.Error(t, err)
+}

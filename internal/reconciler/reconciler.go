@@ -3,6 +3,8 @@ package reconciler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -283,9 +285,16 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("unable to stat playbook %s: %w", playbookPath, err)}
 	}
 
+	gate, err := newReconcileChangedGate(workload, "ansible", workdir, playbookPath, cfg.ReconcileChangedOnly)
+	if err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
+	}
+
+	approveExists := false
+	pendingExists := false
 	if cfg.Mode == "apply" {
-		approveExists := fileExists(approvePath)
-		pendingExists := fileExists(approvePendingPath)
+		approveExists = fileExists(approvePath)
+		pendingExists = fileExists(approvePendingPath)
 		if approveExists && !pendingExists {
 			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
@@ -296,12 +305,20 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 			_ = os.Remove(approvePath)
 			approveExists = false
 		}
+	}
+	if gate.shouldSkip(ctx, cfg.Mode == "apply" && approveExists) {
+		return nil
+	}
+	if cfg.Mode == "apply" {
 		if !approveExists {
 			if !pendingExists {
 				if err := os.WriteFile(approvePendingPath, []byte("pending"), 0600); err != nil {
 					return &ExitCodeError{Code: 1, Err: fmt.Errorf("failed to write approval pending file: %w", err)}
 				}
 				notifyNtfy(cfg, workload, "")
+			}
+			if err := gate.markReconciled(); err != nil {
+				return &ExitCodeError{Code: 1, Err: err}
 			}
 			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
@@ -344,6 +361,9 @@ func runAnsible(ctx context.Context, workload string, cfg Config, approvePath, a
 		_ = os.Remove(approvePath)
 		_ = os.Remove(approvePendingPath)
 	}
+	if err := gate.markReconciled(); err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
+	}
 	return nil
 }
 
@@ -359,9 +379,15 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("unable to stat dnsconfig %s: %w", dnsConfigPath, err)}
 	}
 
+	gate, err := newReconcileChangedGate(workload, "dnscontrol", workdir, dnsConfigPath, cfg.ReconcileChangedOnly)
+	if err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
+	}
+
+	approveExists := false
 	pendingExists := false
 	if cfg.Mode == "apply" {
-		approveExists := fileExists(approvePath)
+		approveExists = fileExists(approvePath)
 		pendingExists = fileExists(approvePendingPath)
 		if approveExists && !pendingExists {
 			logrus.WithFields(withRequestID(ctx, logrus.Fields{
@@ -373,6 +399,13 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 			_ = os.Remove(approvePath)
 			approveExists = false
 		}
+	}
+
+	if gate.shouldSkip(ctx, cfg.Mode == "apply" && approveExists) {
+		return nil
+	}
+
+	if cfg.Mode == "apply" {
 		if approveExists {
 			logrus.WithFields(withRequestID(ctx, logrus.Fields{
 				"component":     "reconciler",
@@ -391,6 +424,9 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 			_ = os.Remove(approvePendingPath)
 			_ = os.Remove(previewTextPath)
 			_ = os.Remove(previewReportPath)
+			if err := gate.markReconciled(); err != nil {
+				return &ExitCodeError{Code: 1, Err: err}
+			}
 			return nil
 		}
 	}
@@ -430,6 +466,9 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 			_ = os.Remove(previewReportPath)
 			_ = os.Remove(approvePendingPath)
 		}
+		if err := gate.markReconciled(); err != nil {
+			return &ExitCodeError{Code: 1, Err: err}
+		}
 		return nil
 	}
 
@@ -455,6 +494,9 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 		}
 		_ = os.Remove(previewTextPath)
 		_ = os.Remove(previewReportPath)
+		if err := gate.markReconciled(); err != nil {
+			return &ExitCodeError{Code: 1, Err: err}
+		}
 		return nil
 	}
 	if cfg.Mode == "apply" {
@@ -477,6 +519,9 @@ func runDNSControl(ctx context.Context, workload string, cfg Config, approvePath
 			"mode":             cfg.Mode,
 			"preview_txt_path": previewTextPath,
 		})).Info("preview written; approval required")
+	}
+	if err := gate.markReconciled(); err != nil {
+		return &ExitCodeError{Code: 1, Err: err}
 	}
 
 	return nil
@@ -671,6 +716,100 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+type reconcileChangedGate struct {
+	enabled      bool
+	workload     string
+	workloadType string
+	watchedPath  string
+	hashPath     string
+	currentHash  string
+	changed      bool
+}
+
+func newReconcileChangedGate(workload, workloadType, workdir, watchedPath string, enabled bool) (*reconcileChangedGate, error) {
+	gate := &reconcileChangedGate{
+		enabled:      enabled,
+		workload:     workload,
+		workloadType: workloadType,
+		watchedPath:  watchedPath,
+		hashPath:     filepath.Join(workdir, ".reconcile-input.sha256"),
+	}
+	if !enabled {
+		return gate, nil
+	}
+
+	currentHash, err := fileSHA256(watchedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash %s: %w", watchedPath, err)
+	}
+	gate.currentHash = currentHash
+
+	previousHashBytes, err := os.ReadFile(gate.hashPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			gate.changed = true
+			return gate, nil
+		}
+		return nil, fmt.Errorf("failed to read reconcile hash file %s: %w", gate.hashPath, err)
+	}
+	previousHash := strings.TrimSpace(string(previousHashBytes))
+	gate.changed = previousHash != gate.currentHash
+	return gate, nil
+}
+
+func (g *reconcileChangedGate) shouldSkip(ctx context.Context, hasApproval bool) bool {
+	if g == nil || !g.enabled {
+		return false
+	}
+	if ForceReconcileFromContext(ctx) {
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
+			"component":     "reconciler",
+			"workload":      g.workload,
+			"workload_type": g.workloadType,
+			"path":          g.watchedPath,
+		})).Info("change-gated reconcile bypassed due to manual force trigger")
+		return false
+	}
+	if hasApproval {
+		logrus.WithFields(withRequestID(ctx, logrus.Fields{
+			"component":     "reconciler",
+			"workload":      g.workload,
+			"workload_type": g.workloadType,
+			"path":          g.watchedPath,
+		})).Info("change-gated reconcile bypassed due to approval")
+		return false
+	}
+	if g.changed {
+		return false
+	}
+	logrus.WithFields(withRequestID(ctx, logrus.Fields{
+		"component":     "reconciler",
+		"workload":      g.workload,
+		"workload_type": g.workloadType,
+		"path":          g.watchedPath,
+	})).Info("skipping reconcile; watched file unchanged")
+	return true
+}
+
+func (g *reconcileChangedGate) markReconciled() error {
+	if g == nil || !g.enabled {
+		return nil
+	}
+	if err := os.WriteFile(g.hashPath, []byte(g.currentHash+"\n"), 0600); err != nil {
+		return fmt.Errorf("failed to persist reconcile hash %s: %w", g.hashPath, err)
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // MergeConfig applies env file values to the config unless locked by CLI flags.
 func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, error) {
 	if !locks.WorkloadType {
@@ -694,6 +833,15 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 	}
 	if cfg.Mode != "plan" && cfg.Mode != "apply" && cfg.Mode != "auto-apply" {
 		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid MODE %q: must be plan, apply, or auto-apply", cfg.Mode)}
+	}
+	if !locks.ReconcileChangedOnly {
+		if value, ok := env["RECONCILE_CHANGED_ONLY"]; ok {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid RECONCILE_CHANGED_ONLY %q: %w", value, err)}
+			}
+			cfg.ReconcileChangedOnly = parsed
+		}
 	}
 
 	if !locks.Upgrade {

@@ -495,7 +495,7 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	triggerCtx := reconciler.WithRequestID(h.ctx, requestID)
+	triggerCtx := reconciler.WithForceReconcile(reconciler.WithRequestID(h.ctx, requestID), true)
 	if err := h.dispatcher.Trigger(triggerCtx, workload); err != nil {
 		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
 			"component": "api",

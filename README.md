@@ -54,8 +54,9 @@ Common:
 - `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
 - `APPROVE_URL`, `WORKLOAD_TOKEN`
 - `RECONCILE_ENABLED`, `RECONCILE_INTERVAL` (scheduler)
-- `TOFUHUT_WORKLOAD_CONFIG_DIR` (optional; default `/etc/tofuhut/workloads`)
-- `TOFUHUT_WORKLOAD_RUNTIME_DIR` (optional; default `/var/lib/tofuhut/workloads`)
+- `RECONCILE_CHANGED_ONLY` (default `false`; only for `ansible`/`dnscontrol`, reconcile only when watched file content changed)
+- `TOFUHUT_WORKLOAD_CONFIG_DIR` (default `/etc/tofuhut/workloads`)
+- `TOFUHUT_WORKLOAD_RUNTIME_DIR` (default `/var/lib/tofuhut/workloads`)
 - `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, `fatal`, `panic`; default `info`)
 - `LOG_FORMAT` (`text` or `json`; default `text`)
 

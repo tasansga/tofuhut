@@ -17,6 +17,7 @@ type fakeRunner struct {
 	started  chan struct{}
 	block    chan struct{}
 	workload string
+	force    bool
 }
 
 func makePaths(t *testing.T) reconciler.Paths {
@@ -45,6 +46,7 @@ func newFakeRunner(block bool) *fakeRunner {
 
 func (r *fakeRunner) Run(ctx context.Context, workload string) error {
 	r.workload = workload
+	r.force = reconciler.ForceReconcileFromContext(ctx)
 	select {
 	case r.started <- struct{}{}:
 	default:
@@ -153,6 +155,7 @@ func TestReconcileStartsWorkload(t *testing.T) {
 		t.Fatalf("expected runner to start")
 	}
 	assert.Equal(t, "demo", runner.workload)
+	assert.True(t, runner.force)
 }
 
 func TestReconcileRejectsUnauthorized(t *testing.T) {
