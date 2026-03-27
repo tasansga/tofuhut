@@ -92,7 +92,7 @@ func (s *Scheduler) runWorkload(ctx context.Context, spec WorkloadSpec) {
 
 		start := time.Now()
 		runID := newScheduledRunID()
-		runCtx := reconciler.WithRequestID(ctx, runID)
+		runCtx := reconciler.WithTriggerSource(reconciler.WithRequestID(ctx, runID), "scheduler")
 		err := s.runner.Run(runCtx, spec.Name)
 		latency := time.Since(start)
 		if err != nil {

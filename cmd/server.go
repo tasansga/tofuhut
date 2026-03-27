@@ -15,8 +15,13 @@ import (
 	"syscall"
 	"time"
 
+	promclient "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
+	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"tofuhut/internal/reconciler"
 	"tofuhut/internal/reconciler/scheduler"
 )
@@ -71,11 +76,24 @@ var serverRunCmd = &cobra.Command{
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 
+		metricsHandler, shutdownMetrics, err := setupMetrics()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := shutdownMetrics(shutdownCtx); err != nil {
+				logrus.WithError(err).WithField("component", "server").Warn("metrics shutdown failed")
+			}
+		}()
+
 		cfg := reconciler.Config{}
 		locks := reconciler.ConfigLocks{}
 		dispatcher := newDispatcher(reconciler.NewDefaultRunner(cfg, locks, paths), ctx)
 		handler := newServerHandler(cfg, locks, dispatcher, paths)
 		handler.(*serverHandler).ctx = ctx
+		handler.(*serverHandler).metricsHandler = metricsHandler
 		server := &http.Server{
 			Addr:              listen,
 			Handler:           handler,
@@ -193,11 +211,12 @@ func init() {
 }
 
 type serverHandler struct {
-	cfg        reconciler.Config
-	locks      reconciler.ConfigLocks
-	dispatcher *dispatcher
-	paths      reconciler.Paths
-	ctx        context.Context
+	cfg            reconciler.Config
+	locks          reconciler.ConfigLocks
+	dispatcher     *dispatcher
+	paths          reconciler.Paths
+	ctx            context.Context
+	metricsHandler http.Handler
 }
 
 func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, dispatcher *dispatcher, paths reconciler.Paths) http.Handler {
@@ -217,6 +236,18 @@ func (h *serverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.URL.Path == "/metrics" {
+		if h.metricsHandler == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		h.metricsHandler.ServeHTTP(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/approve/") {
@@ -495,7 +526,10 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	triggerCtx := reconciler.WithForceReconcile(reconciler.WithRequestID(h.ctx, requestID), true)
+	triggerCtx := reconciler.WithTriggerSource(
+		reconciler.WithForceReconcile(reconciler.WithRequestID(h.ctx, requestID), true),
+		"api_manual",
+	)
 	if err := h.dispatcher.Trigger(triggerCtx, workload); err != nil {
 		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
 			"component": "api",
@@ -546,6 +580,21 @@ func apiFields(requestID string, fields logrus.Fields) logrus.Fields {
 		fields["request_id"] = requestID
 	}
 	return fields
+}
+
+func setupMetrics() (http.Handler, func(context.Context) error, error) {
+	registry := promclient.NewRegistry()
+	exporter, err := otelprom.New(otelprom.WithRegisterer(registry))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create prometheus exporter: %w", err)
+	}
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
+	otel.SetMeterProvider(meterProvider)
+	if err := reconciler.InitMetrics(meterProvider.Meter("tofuhut")); err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize metrics: %w", err)
+	}
+	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	return handler, meterProvider.Shutdown, nil
 }
 
 type dispatcher struct {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type fakeRunner struct {
 	block    chan struct{}
 	workload string
 	force    bool
+	trigger  string
 }
 
 func makePaths(t *testing.T) reconciler.Paths {
@@ -47,6 +49,7 @@ func newFakeRunner(block bool) *fakeRunner {
 func (r *fakeRunner) Run(ctx context.Context, workload string) error {
 	r.workload = workload
 	r.force = reconciler.ForceReconcileFromContext(ctx)
+	r.trigger = reconciler.TriggerSourceFromContext(ctx)
 	select {
 	case r.started <- struct{}{}:
 	default:
@@ -156,6 +159,27 @@ func TestReconcileStartsWorkload(t *testing.T) {
 	}
 	assert.Equal(t, "demo", runner.workload)
 	assert.True(t, runner.force)
+	assert.Equal(t, "api_manual", runner.trigger)
+}
+
+func TestMetricsEndpointAvailable(t *testing.T) {
+	paths := makePaths(t)
+
+	metricsHandler, shutdownMetrics, err := setupMetrics()
+	assert.NoError(t, err)
+	t.Cleanup(func() {
+		_ = shutdownMetrics(context.Background())
+	})
+
+	h := newServerHandler(reconciler.Config{}, reconciler.ConfigLocks{}, nil, paths).(*serverHandler)
+	h.metricsHandler = metricsHandler
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, strings.Contains(rec.Body.String(), "# HELP"))
 }
 
 func TestReconcileRejectsUnauthorized(t *testing.T) {

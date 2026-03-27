@@ -6,6 +6,7 @@ type contextKey string
 
 const requestIDContextKey contextKey = "tofuhut_request_id"
 const forceReconcileContextKey contextKey = "tofuhut_force_reconcile"
+const triggerSourceContextKey contextKey = "tofuhut_trigger_source"
 
 // WithRequestID stores a request id in context for log correlation.
 func WithRequestID(ctx context.Context, requestID string) context.Context {
@@ -42,4 +43,24 @@ func ForceReconcileFromContext(ctx context.Context) bool {
 	}
 	v, ok := ctx.Value(forceReconcileContextKey).(bool)
 	return ok && v
+}
+
+// WithTriggerSource stores the source of a reconcile trigger.
+func WithTriggerSource(ctx context.Context, source string) context.Context {
+	if source == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, triggerSourceContextKey, source)
+}
+
+// TriggerSourceFromContext returns the source of a reconcile trigger.
+func TriggerSourceFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, ok := ctx.Value(triggerSourceContextKey).(string)
+	if !ok {
+		return ""
+	}
+	return v
 }

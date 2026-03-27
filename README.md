@@ -102,6 +102,7 @@ On successful approved run, Tofuhut removes approval/pending artifacts.
 - ntfy Approve action is included when `APPROVE_URL` is set
 - Gatus success/failure reporting is enabled when `GATUS_CLI_URL` + token are configured
 - Server responses include CORS header `Access-Control-Allow-Origin: *`
+- In `server run`, `GET /metrics` exposes Prometheus scrape output backed by OpenTelemetry metrics
 
 ## Environment Propagation
 

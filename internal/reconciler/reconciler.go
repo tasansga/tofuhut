@@ -43,7 +43,35 @@ func Run(workload string, cfg Config, envFile string, envFromFile map[string]str
 }
 
 // RunWithContext executes the reconciler flow for the given workload name.
-func RunWithContext(ctx context.Context, workload string, cfg Config, envFile string, envFromFile map[string]string, paths Paths) error {
+func RunWithContext(ctx context.Context, workload string, cfg Config, envFile string, envFromFile map[string]string, paths Paths) (runErr error) {
+	finishMetric := startRunMetric(ctx, workload, cfg.WorkloadType)
+	metricDone := false
+	recordMetric := func(result string) {
+		if metricDone {
+			return
+		}
+		metricDone = true
+		finishMetric(result)
+	}
+	defer func() {
+		if metricDone {
+			return
+		}
+		if runErr != nil {
+			if ctx.Err() != nil {
+				recordMetric("canceled")
+				return
+			}
+			recordMetric("error")
+			return
+		}
+		if ctx.Err() != nil {
+			recordMetric("canceled")
+			return
+		}
+		recordMetric("success")
+	}()
+
 	workdir := paths.WorkDirPath(workload)
 	planTextPath := filepath.Join(workdir, fmt.Sprintf("%s-plan.txt", workload))
 	planFilePath := filepath.Join(workdir, "plan.tfplan")

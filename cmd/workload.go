@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/sirupsen/logrus"
@@ -64,7 +65,8 @@ var workloadRunCmd = &cobra.Command{
 			"gatus_has_token": mergedConfig.GatusToken != "",
 		}).Debug("starting workload run")
 
-		if err := reconciler.Run(name, mergedConfig, envFile, envFromFile, paths); err != nil {
+		runCtx := reconciler.WithTriggerSource(context.Background(), "cli")
+		if err := reconciler.RunWithContext(runCtx, name, mergedConfig, envFile, envFromFile, paths); err != nil {
 			logrus.WithError(err).WithFields(logrus.Fields{
 				"component": "runner",
 				"workload":  name,
