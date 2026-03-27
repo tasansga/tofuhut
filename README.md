@@ -53,6 +53,8 @@ Common:
 - `GATUS_CLI_URL`, `GATUS_CLI_TOKEN`
 - `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
 - `APPROVE_URL`, `WORKLOAD_TOKEN`
+- `PRE_RECONCILE_HOOK`, `POST_RECONCILE_HOOK` (optional absolute script paths)
+- `PRE_RECONCILE_TIMEOUT`, `POST_RECONCILE_TIMEOUT` (optional durations, e.g. `30s`)
 - `RECONCILE_ENABLED`, `RECONCILE_INTERVAL` (scheduler)
 - `RECONCILE_CHANGED_ONLY` (default `false`; only for `ansible`/`dnscontrol`, reconcile only when watched file content changed)
 - `TOFUHUT_WORKLOAD_CONFIG_DIR` (default `/etc/tofuhut/workloads`)
@@ -72,6 +74,10 @@ Tofu-specific:
 | `ansible` | `ansible-playbook -v -c local --check playbook.yml` | Waits for approval, then runs `ansible-playbook -v -c local playbook.yml` | Runs `ansible-playbook -v -c local playbook.yml` |
 | `dnscontrol` | `dnscontrol preview --report preview-report.json` | Writes preview artifacts, waits for approval, then runs `dnscontrol push` | Runs `dnscontrol push` when preview shows changes |
 | `tofu` | `tofu init`, then `tofu plan -input=false -no-color -detailed-exitcode` | Stores plan artifacts, waits for approval, then applies stored plan | Runs `tofu apply -input=false -auto-approve` when plan shows changes |
+
+If `PRE_RECONCILE_HOOK` is set, it runs before every reconcile attempt.
+If `POST_RECONCILE_HOOK` is set, it runs after every reconcile attempt, including changed-only skips.
+For changed-only workloads, pre-hook runs first, then file-change evaluation happens.
 
 ## Approval and API
 

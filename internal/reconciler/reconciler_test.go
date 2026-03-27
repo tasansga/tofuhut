@@ -299,6 +299,86 @@ func TestRunAnsibleChangedOnlyForceContextBypassesSkip(t *testing.T) {
 	assert.Len(t, lines, 2)
 }
 
+func TestRunAnsiblePreHookRunsBeforeChangedOnlyGate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
+	newWorkloadDir(t, workdir)
+	playbookPath := filepath.Join(workdir, "playbook.yml")
+	sourcePath := filepath.Join(workdir, "playbook-source.yml")
+	assert.NoError(t, os.WriteFile(playbookPath, []byte("v1"), 0644))
+	assert.NoError(t, os.WriteFile(sourcePath, []byte("v1"), 0644))
+
+	tmpBin := t.TempDir()
+	logPath := filepath.Join(workdir, "ansible.log")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"run\" >> \""+logPath+"\"\nexit 0\n")
+
+	preHookPath := filepath.Join(workdir, "pre-hook.sh")
+	assert.NoError(t, os.WriteFile(preHookPath, []byte("#!/bin/sh\ncp \""+sourcePath+"\" \""+playbookPath+"\"\n"), 0755))
+
+	cfg := Config{
+		WorkloadType:         "ansible",
+		Mode:                 "plan",
+		ReconcileChangedOnly: true,
+		PreReconcileHook:     preHookPath,
+	}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	assert.NoError(t, os.WriteFile(sourcePath, []byte("v2"), 0644))
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	data, err := os.ReadFile(logPath)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assert.Len(t, lines, 2)
+}
+
+func TestRunAnsiblePostHookRunsWhenChangedOnlySkips(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not supported on windows")
+	}
+
+	paths := withTempPaths(t)
+	workdir := filepath.Join(paths.RuntimeDir, "workload")
+	newWorkloadDir(t, workdir)
+	playbookPath := filepath.Join(workdir, "playbook.yml")
+	assert.NoError(t, os.WriteFile(playbookPath, []byte("ok"), 0644))
+
+	tmpBin := t.TempDir()
+	ansibleLogPath := filepath.Join(workdir, "ansible.log")
+	setupFakeTool(t, filepath.Join(tmpBin, "ansible-playbook"), paths.RuntimeDir, "#!/bin/sh\necho \"run\" >> \""+ansibleLogPath+"\"\nexit 0\n")
+
+	postLogPath := filepath.Join(workdir, "post.log")
+	postHookPath := filepath.Join(workdir, "post-hook.sh")
+	assert.NoError(t, os.WriteFile(postHookPath, []byte("#!/bin/sh\necho \"post:$TOFUHUT_RESULT\" >> \""+postLogPath+"\"\n"), 0755))
+
+	cfg := Config{
+		WorkloadType:         "ansible",
+		Mode:                 "plan",
+		ReconcileChangedOnly: true,
+		PostReconcileHook:    postHookPath,
+	}
+	err := Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+	err = Run("workload", cfg, filepath.Join(t.TempDir(), "workload.env"), map[string]string{}, paths)
+	assert.NoError(t, err)
+
+	ansibleData, err := os.ReadFile(ansibleLogPath)
+	assert.NoError(t, err)
+	ansibleLines := strings.Split(strings.TrimSpace(string(ansibleData)), "\n")
+	assert.Len(t, ansibleLines, 1)
+
+	postData, err := os.ReadFile(postLogPath)
+	assert.NoError(t, err)
+	postLines := strings.Split(strings.TrimSpace(string(postData)), "\n")
+	assert.Len(t, postLines, 2)
+}
+
 func TestRunAnsibleChangedOnlyApplyUsesApprovalDespiteUnchanged(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts are not supported on windows")

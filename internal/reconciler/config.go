@@ -1,9 +1,15 @@
 package reconciler
 
+import "time"
+
 // Config holds resolved runtime settings for a workload run.
 type Config struct {
 	WorkloadType         string
 	Mode                 string
+	PreReconcileHook     string
+	PostReconcileHook    string
+	PreHookTimeout       time.Duration
+	PostHookTimeout      time.Duration
 	ReconcileChangedOnly bool
 	Upgrade              bool
 	Reconfigure          bool
@@ -21,6 +27,10 @@ type Config struct {
 type ConfigLocks struct {
 	WorkloadType         bool
 	Mode                 bool
+	PreReconcileHook     bool
+	PostReconcileHook    bool
+	PreHookTimeout       bool
+	PostHookTimeout      bool
 	ReconcileChangedOnly bool
 	Upgrade              bool
 	Reconfigure          bool

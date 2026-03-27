@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -80,6 +81,31 @@ func TestMergeConfigInvalidReconcileChangedOnly(t *testing.T) {
 	env := map[string]string{
 		"WORKLOAD_TYPE":          "ansible",
 		"RECONCILE_CHANGED_ONLY": "not-bool",
+	}
+	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.Error(t, err)
+}
+
+func TestMergeConfigHooksAndTimeouts(t *testing.T) {
+	env := map[string]string{
+		"WORKLOAD_TYPE":          "ansible",
+		"PRE_RECONCILE_HOOK":     "/usr/local/bin/pre.sh",
+		"POST_RECONCILE_HOOK":    "/usr/local/bin/post.sh",
+		"PRE_RECONCILE_TIMEOUT":  "15s",
+		"POST_RECONCILE_TIMEOUT": "30s",
+	}
+	merged, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.NoError(t, err)
+	assert.Equal(t, "/usr/local/bin/pre.sh", merged.PreReconcileHook)
+	assert.Equal(t, "/usr/local/bin/post.sh", merged.PostReconcileHook)
+	assert.Equal(t, 15*time.Second, merged.PreHookTimeout)
+	assert.Equal(t, 30*time.Second, merged.PostHookTimeout)
+}
+
+func TestMergeConfigInvalidPreHookTimeout(t *testing.T) {
+	env := map[string]string{
+		"WORKLOAD_TYPE":         "ansible",
+		"PRE_RECONCILE_TIMEOUT": "bad",
 	}
 	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
 	assert.Error(t, err)

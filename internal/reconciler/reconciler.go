@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -112,6 +113,30 @@ func RunWithContext(ctx context.Context, workload string, cfg Config, envFile st
 		}
 		handler.NotifySuccess()
 	}()
+
+	defer func() {
+		if cfg.PostReconcileHook == "" {
+			return
+		}
+		postResult := reconcileResultForHook(runErr, ctx)
+		hookEnv := hookEnv(cmdEnv, workload, workdir, postResult, ctx)
+		if err := runReconcileHook(ctx, "post", cfg.PostReconcileHook, cfg.PostHookTimeout, hookEnv, workdir); err != nil {
+			if runErr == nil {
+				exitCode = 1
+				runErr = &ExitCodeError{Code: 1, Err: err}
+				return
+			}
+			logrus.WithError(err).WithFields(withRequestID(ctx, logrus.Fields{
+				"component": "reconciler",
+				"workload":  workload,
+			})).Warn("post-reconcile hook failed after workload failure")
+		}
+	}()
+
+	if err := runReconcileHook(ctx, "pre", cfg.PreReconcileHook, cfg.PreHookTimeout, hookEnv(cmdEnv, workload, workdir, "running", ctx), workdir); err != nil {
+		exitCode = 1
+		return &ExitCodeError{Code: 1, Err: err}
+	}
 
 	if cfg.WorkloadType == "ansible" {
 		if err := runAnsible(ctx, workload, cfg, approvePath, approvePendingPath, playbookPath, cmdEnv, workdir); err != nil {
@@ -610,6 +635,64 @@ func runCommand(ctx context.Context, opts commandOptions, name string, args ...s
 	return 0, nil
 }
 
+func runReconcileHook(ctx context.Context, phase, hookPath string, timeout time.Duration, env []string, workdir string) error {
+	if hookPath == "" {
+		return nil
+	}
+	if !filepath.IsAbs(hookPath) {
+		return fmt.Errorf("%s-reconcile hook must be an absolute path: %s", phase, hookPath)
+	}
+
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	logrus.WithFields(withRequestID(ctx, logrus.Fields{
+		"component": "reconciler",
+		"phase":     phase,
+		"hook_path": hookPath,
+	})).Info("running reconcile hook")
+
+	code, err := runCommand(runCtx, commandOptions{Env: env, Dir: workdir}, hookPath)
+	if err != nil {
+		return fmt.Errorf("%s-reconcile hook failed: %w", phase, err)
+	}
+	if code != 0 {
+		return fmt.Errorf("%s-reconcile hook failed (rc=%d)", phase, code)
+	}
+	return nil
+}
+
+func hookEnv(baseEnv []string, workload, workdir, result string, ctx context.Context) []string {
+	env := append([]string{}, baseEnv...)
+	env = setEnvValue(env, "TOFUHUT_WORKLOAD", workload)
+	env = setEnvValue(env, "TOFUHUT_WORKDIR", workdir)
+	env = setEnvValue(env, "TOFUHUT_RESULT", result)
+	if requestID, ok := RequestIDFromContext(ctx); ok {
+		env = setEnvValue(env, "TOFUHUT_REQUEST_ID", requestID)
+	}
+	if trigger := TriggerSourceFromContext(ctx); trigger != "" {
+		env = setEnvValue(env, "TOFUHUT_TRIGGER", trigger)
+	}
+	return env
+}
+
+func reconcileResultForHook(runErr error, ctx context.Context) string {
+	if runErr != nil {
+		if ctx.Err() != nil {
+			return "canceled"
+		}
+		return "error"
+	}
+	if ctx.Err() != nil {
+		return "canceled"
+	}
+	return "success"
+}
+
 // LoadEnvFile sources the env file and returns only the variables set/changed by the file.
 func LoadEnvFile(path string) (map[string]string, error) {
 	if _, err := os.Stat(path); err != nil {
@@ -861,6 +944,34 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 	}
 	if cfg.Mode != "plan" && cfg.Mode != "apply" && cfg.Mode != "auto-apply" {
 		return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid MODE %q: must be plan, apply, or auto-apply", cfg.Mode)}
+	}
+	if !locks.PreReconcileHook {
+		if value, ok := env["PRE_RECONCILE_HOOK"]; ok {
+			cfg.PreReconcileHook = value
+		}
+	}
+	if !locks.PostReconcileHook {
+		if value, ok := env["POST_RECONCILE_HOOK"]; ok {
+			cfg.PostReconcileHook = value
+		}
+	}
+	if !locks.PreHookTimeout {
+		if value, ok := env["PRE_RECONCILE_TIMEOUT"]; ok && value != "" {
+			parsed, err := time.ParseDuration(value)
+			if err != nil {
+				return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid PRE_RECONCILE_TIMEOUT %q: %w", value, err)}
+			}
+			cfg.PreHookTimeout = parsed
+		}
+	}
+	if !locks.PostHookTimeout {
+		if value, ok := env["POST_RECONCILE_TIMEOUT"]; ok && value != "" {
+			parsed, err := time.ParseDuration(value)
+			if err != nil {
+				return cfg, &ExitCodeError{Code: 2, Err: fmt.Errorf("invalid POST_RECONCILE_TIMEOUT %q: %w", value, err)}
+			}
+			cfg.PostHookTimeout = parsed
+		}
 	}
 	if !locks.ReconcileChangedOnly {
 		if value, ok := env["RECONCILE_CHANGED_ONLY"]; ok {
