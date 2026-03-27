@@ -6,15 +6,15 @@ Tofuhut is an infrastructure reconciler CLI for three workload types:
 - `dnscontrol`
 - `tofu` (OpenTofu)
 
-It supports `plan`/`apply`/`auto-apply` modes, approval-gated runs, optional `ntfy` notifications, and optional Gatus reporting.
+It supports `plan`/`apply`/`auto-apply` modes, approval-gated runs, periodic scheduling, optional ntfy notifications, optional Gatus reporting, and Prometheus-compatible metrics in server mode.
 
-## Usage
+## Quick Start
 
-Run a workload once:
+Either run a workload once:
 
 - `tofuhut workload run <name>`
 
-Run approval/reconciliation server:
+Or run the approval/reconciliation server:
 
 - `tofuhut server run --listen :8080`
 
@@ -25,47 +25,99 @@ Set logging at runtime:
 
 ## Workload Layout
 
-- Working directory: `/var/lib/tofuhut/workloads/<workload>`
-- Env file: `/etc/tofuhut/workloads/<workload>.env`
+Default paths:
 
-Directories can be overridden via flags or env vars. Defaults:
+- Workload runtime dir: `/var/lib/tofuhut/workloads/<workload>`
+- Workload env file: `/etc/tofuhut/workloads/<workload>.env`
 
-- `workload config dir`: `/etc/tofuhut/workloads`
-- `workload runtime dir`: `/var/lib/tofuhut/workloads`
-
-Override using:
+Override root directories with:
 
 - `TOFUHUT_WORKLOAD_CONFIG_DIR`
 - `TOFUHUT_WORKLOAD_RUNTIME_DIR`
 
-Required workload files:
+Required files per workload type:
 
 - `ansible`: `playbook.yml`
 - `dnscontrol`: `dnsconfig.js`
-- `tofu`: OpenTofu files like `*.tf`
+- `tofu`: OpenTofu files such as `*.tf`
+
+## Runtime Requirements
+
+Tofuhut executes workload tools directly. The required binary must be available in `PATH`:
+
+- `ansible` workloads: `ansible-playbook` ([Ansible](https://www.ansible.com/))
+- `dnscontrol` workloads: `dnscontrol` ([DNSControl](https://dnscontrol.org/))
+- `tofu` workloads: `tofu` ([OpenTofu](https://opentofu.org/))
 
 ## Environment Variables
 
-Common:
+### Required
 
-- `WORKLOAD_TYPE` (required): `ansible`, `dnscontrol`, or `tofu`
+- `WORKLOAD_TYPE`: `ansible`, `dnscontrol`, or `tofu`
+
+### Core execution
+
 - `MODE`: `plan`, `apply`, or `auto-apply` (default: `plan`)
-- `GATUS_CLI_URL`, `GATUS_CLI_TOKEN`
+
+### Scheduler
+
+- `RECONCILE_ENABLED` (default: `true`)
+- `RECONCILE_INTERVAL` (default comes from server flag `--scheduler-default-interval`)
+- `RECONCILE_CHANGED_ONLY` (default: `false`)
+  - For `ansible`/`dnscontrol`: if `true`, Tofuhut hashes `playbook.yml`/`dnsconfig.js` and skips unchanged runs.
+  - For `tofu`: currently ignored.
+  - Manual `POST /reconcile/<workload>` still forces a run.
+
+### Hooks
+
+- `PRE_RECONCILE_HOOK`, `POST_RECONCILE_HOOK`: optional absolute script paths.
+- `PRE_RECONCILE_TIMEOUT`, `POST_RECONCILE_TIMEOUT`: optional duration values (for example `30s`). Unset means no timeout.
+
+Hook execution order and behavior:
+
+- Pre-hook runs before every reconcile attempt.
+- For changed-only workloads, pre-hook runs before file-change evaluation.
+- Post-hook runs after every attempt, including changed-only skips.
+
+Hook failure behavior:
+
+- Pre-hook non-zero/exec failure fails the reconcile run.
+- Post-hook non-zero/exec failure fails an otherwise successful reconcile run.
+- If the main reconcile already failed, post-hook failure is logged as warning and the original reconcile error is preserved.
+
+Hook env vars provided by Tofuhut:
+
+- `TOFUHUT_WORKLOAD`
+- `TOFUHUT_WORKDIR`
+- `TOFUHUT_RESULT` (`success`, `error`, `canceled`)
+- `TOFUHUT_REQUEST_ID` (if available)
+- `TOFUHUT_TRIGGER` (`scheduler`, `api_manual`, `cli`, or `unknown`)
+
+### Approval and API auth
+
+- `WORKLOAD_TOKEN`: protects both `POST /approve/<workload>` and `POST /reconcile/<workload>` via `Authorization: Bearer <token>`
+- `APPROVE_URL`: used to build ntfy approve action links/buttons
+
+### Notifications and reporting
+
 - `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`
-- `APPROVE_URL`, `WORKLOAD_TOKEN`
-- `PRE_RECONCILE_HOOK`, `POST_RECONCILE_HOOK` (optional absolute script paths)
-- `PRE_RECONCILE_TIMEOUT`, `POST_RECONCILE_TIMEOUT` (optional durations, e.g. `30s`)
-- `RECONCILE_ENABLED`, `RECONCILE_INTERVAL` (scheduler)
-- `RECONCILE_CHANGED_ONLY` (default `false`; only for `ansible`/`dnscontrol`, reconcile only when watched file content changed)
-- `TOFUHUT_WORKLOAD_CONFIG_DIR` (default `/etc/tofuhut/workloads`)
-- `TOFUHUT_WORKLOAD_RUNTIME_DIR` (default `/var/lib/tofuhut/workloads`)
-- `LOG_LEVEL` (`debug`, `info`, `warn`, `error`, `fatal`, `panic`; default `info`)
-- `LOG_FORMAT` (`text` or `json`; default `text`)
+  - Sends approval-required notifications when approval is needed.
+  - Includes an approve action when `APPROVE_URL` is set.
+- `GATUS_CLI_URL`, `GATUS_CLI_TOKEN`
+  - Reports run success/failure to the Gatus HTTP API.
+  - If no token is set, Tofuhut also supports token lookup via an optional `gatus_cli_token_for_name` shell function sourced from the workload env file.
 
-Tofu-specific:
+### Logging and paths
 
-- `UPGRADE=true` -> adds `-upgrade` to `tofu init`
-- `RECONFIGURE=true` -> adds `-reconfigure` to `tofu init`
+- `LOG_LEVEL`: `debug`, `info`, `warn`, `error`, `fatal`, `panic` (default: `info`)
+- `LOG_FORMAT`: `text` or `json` (default: `text`)
+- `TOFUHUT_WORKLOAD_CONFIG_DIR`
+- `TOFUHUT_WORKLOAD_RUNTIME_DIR`
+
+### Tofu-only
+
+- `UPGRADE=true` adds `-upgrade` to `tofu init`
+- `RECONFIGURE=true` adds `-reconfigure` to `tofu init`
 
 ## Workload Behavior
 
@@ -75,22 +127,16 @@ Tofu-specific:
 | `dnscontrol` | `dnscontrol preview --report preview-report.json` | Writes preview artifacts, waits for approval, then runs `dnscontrol push` | Runs `dnscontrol push` when preview shows changes |
 | `tofu` | `tofu init`, then `tofu plan -input=false -no-color -detailed-exitcode` | Stores plan artifacts, waits for approval, then applies stored plan | Runs `tofu apply -input=false -auto-approve` when plan shows changes |
 
-If `PRE_RECONCILE_HOOK` is set, it runs before every reconcile attempt.
-If `POST_RECONCILE_HOOK` is set, it runs after every reconcile attempt, including changed-only skips.
-For changed-only workloads, pre-hook runs first, then file-change evaluation happens.
+## API Endpoints
 
-## Approval and API
+- `POST /approve/<workload>` records approval.
+- `POST /reconcile/<workload>` queues reconciliation.
 
-In `MODE=apply`, approval is recorded by creating:
+In `MODE=apply`, approval is represented by:
 
 - `/var/lib/tofuhut/workloads/<workload>/approve`
 
-HTTP endpoints:
-
-- `POST /approve/<workload>` records approval
-- `POST /reconcile/<workload>` triggers reconciliation
-
-If `WORKLOAD_TOKEN` is set, both endpoints require:
+If `WORKLOAD_TOKEN` is set, both API endpoints require:
 
 - `Authorization: Bearer <token>`
 
@@ -102,25 +148,11 @@ If `WORKLOAD_TOKEN` is set, both endpoints require:
 
 On successful approved run, Tofuhut removes approval/pending artifacts.
 
-## Notifications and Reporting
+## Observability
 
-- `ntfy` notifications are sent when approval is required and `NTFY_URL` + `NTFY_TOPIC` are set
-- ntfy Approve action is included when `APPROVE_URL` is set
-- Gatus success/failure reporting is enabled when `GATUS_CLI_URL` + token are configured
-- Server responses include CORS header `Access-Control-Allow-Origin: *`
-- In `server run`, `GET /metrics` exposes Prometheus scrape output backed by OpenTelemetry metrics
+- `GET /metrics` in `tofuhut server run` exposes Prometheus scrape output backed by OpenTelemetry metrics.
+- API responses include CORS header `Access-Control-Allow-Origin: *`.
 
 ## Environment Propagation
 
-Tofuhut passes a restricted allowlist of host env vars to workload commands, then merges values from the workload env file. Add provider credentials explicitly in each workload env file.
-
-## Systemd Templates
-
-Embedded example workload templates, available with `tofuhut workload print`:
-
-- `tofuhut-workload@.service`
-- `tofuhut-workload@.timer`
-
-Workload service command:
-
-- `ExecStart=tofuhut workload run %i`
+Tofuhut passes a restricted allowlist of host environment variables to workload commands, then merges values from the workload env file. Add provider credentials explicitly in each workload env file.
