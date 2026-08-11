@@ -15,6 +15,10 @@ lint:
 	gofmt -w .
 	golangci-lint run ./...
 
+modupdate:
+	go get -u ./...
+	go mod tidy
+
 test:
 	go test ./...
 
@@ -32,4 +36,4 @@ image:
 		-t tofuhut:$${TAG:-dev} \
 		.
 
-.PHONY: all build lint test tidy clean image
+.PHONY: all modupdate build lint test tidy clean image
