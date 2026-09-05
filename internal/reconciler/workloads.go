@@ -58,10 +58,6 @@ func LoadWorkloadSpecs(defaultInterval time.Duration, paths Paths) ([]WorkloadSp
 			interval = parsed
 		}
 
-		if interval <= 0 {
-			enabled = false
-		}
-
 		specs = append(specs, WorkloadSpec{
 			Name:     name,
 			Interval: interval,

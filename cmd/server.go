@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -113,65 +115,63 @@ var serverRunCmd = &cobra.Command{
 			errCh <- server.ListenAndServe()
 		}()
 
+		var syncMu sync.Mutex
 		var schedMu sync.Mutex
 		var sched *scheduler.Scheduler
-		var schedCancel context.CancelFunc
-		startScheduler := func(specs []reconciler.WorkloadSpec) {
-			schedMu.Lock()
-			defer schedMu.Unlock()
-			if schedCancel != nil {
-				schedCancel()
-			}
-			if sched != nil {
-				sched.Wait()
-			}
-			if len(specs) == 0 {
-				sched = nil
-				schedCancel = nil
-				return
-			}
-			childCtx, childCancel := context.WithCancel(ctx)
-			schedCancel = childCancel
-			sched = scheduler.New(newTriggerRunner(dispatcher), toSchedulerSpecs(specs), scheduler.Options{
-				Jitter:        jitter,
-				MaxConcurrent: maxConcurrent,
-			})
-			sched.Start(childCtx)
-		}
-
-		if enableScheduler {
+		syncWorkloads := func() error {
+			syncMu.Lock()
+			defer syncMu.Unlock()
 			specs, err := loadValidWorkloads(defaultInterval, cfg, locks, paths)
 			if err != nil {
 				return err
 			}
 			dispatcher.DisableExcept(workloadsSet(specs))
-			startScheduler(specs)
+			schedMu.Lock()
+			if sched != nil {
+				sched.UpdateSpecs(toSchedulerSpecs(specs))
+			}
+			schedMu.Unlock()
+			return nil
+		}
+		handler.(*serverHandler).syncWorkloads = syncWorkloads
+
+		if enableScheduler {
+			schedMu.Lock()
+			sched = scheduler.New(newTriggerRunner(dispatcher), nil, scheduler.Options{
+				Jitter:        jitter,
+				MaxConcurrent: maxConcurrent,
+			})
+			sched.Start(ctx)
+			schedMu.Unlock()
 		}
 
-		if enableScheduler && rescanInterval > 0 {
-			go func() {
+		if err := syncWorkloads(); err != nil {
+			return err
+		}
+
+		go func() {
+			var tickerCh <-chan time.Time
+			if enableScheduler && rescanInterval > 0 {
 				ticker := time.NewTicker(rescanInterval)
 				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-hupCh:
-						logrus.WithField("component", "server").Info("reload requested; rescanning workloads")
-					case <-ticker.C:
-						logrus.WithField("component", "server").Info("rescan interval reached; rescanning workloads")
-					}
-
-					specs, err := loadValidWorkloads(defaultInterval, cfg, locks, paths)
-					if err != nil {
-						logrus.WithError(err).WithField("component", "server").Warn("failed to rescan workloads")
-						continue
-					}
-					dispatcher.DisableExcept(workloadsSet(specs))
-					startScheduler(specs)
+				tickerCh = ticker.C
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-hupCh:
+					logrus.WithField("component", "server").Info("reload requested; rescanning workloads")
+				case <-tickerCh:
+					logrus.WithField("component", "server").Info("rescan interval reached; rescanning workloads")
 				}
-			}()
-		}
+
+				if err := syncWorkloads(); err != nil {
+					logrus.WithError(err).WithField("component", "server").Warn("failed to rescan workloads")
+					continue
+				}
+			}
+		}()
 
 		select {
 		case <-ctx.Done():
@@ -186,13 +186,13 @@ var serverRunCmd = &cobra.Command{
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logrus.WithError(err).WithField("component", "server").Warn("server shutdown failed")
 		}
-		dispatcher.Stop()
 		schedMu.Lock()
 		currentSched := sched
 		schedMu.Unlock()
 		if currentSched != nil {
-			currentSched.Wait()
+			currentSched.Stop()
 		}
+		dispatcher.Stop()
 		return nil
 	},
 }
@@ -217,6 +217,7 @@ type serverHandler struct {
 	paths          reconciler.Paths
 	ctx            context.Context
 	metricsHandler http.Handler
+	syncWorkloads  func() error
 }
 
 func newServerHandler(cfg reconciler.Config, locks reconciler.ConfigLocks, dispatcher *dispatcher, paths reconciler.Paths) http.Handler {
@@ -236,6 +237,11 @@ func (h *serverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if path == "/reload" || path == "/rescan" {
+		h.handleReload(w, r, start, requestID)
 		return
 	}
 	if r.URL.Path == "/metrics" {
@@ -266,6 +272,67 @@ func (h *serverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
+func (h *serverHandler) handleReload(w http.ResponseWriter, r *http.Request, start time.Time, requestID string) {
+	logger := func(fields logrus.Fields) *logrus.Entry {
+		return logrus.WithFields(apiFields(requestID, fields))
+	}
+
+	if r.Method != http.MethodPost {
+		logger(logrus.Fields{
+			"component": "api",
+			"method":    r.Method,
+			"path":      r.URL.Path,
+		}).Warn("reload request rejected: method not allowed")
+		w.Header().Set("Allow", "POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.cfg.WorkloadToken != "" {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer "+h.cfg.WorkloadToken {
+			logger(logrus.Fields{
+				"component": "api",
+			}).Warn("reload request rejected: unauthorized")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if h.syncWorkloads == nil {
+		logger(logrus.Fields{
+			"component": "api",
+		}).Error("reload request failed: syncWorkloads not configured")
+		w.WriteHeader(http.StatusNotImplemented)
+		return
+	}
+
+	if err := h.syncWorkloads(); err != nil {
+		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
+			"component": "api",
+		})).Error("reload request failed: syncWorkloads error")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	workloads := []string{}
+	if h.dispatcher != nil {
+		workloads = h.dispatcher.EnabledWorkloads()
+	}
+
+	logger(logrus.Fields{
+		"component": "api",
+		"workloads": workloads,
+		"latency":   time.Since(start).String(),
+	}).Info("workload reload completed")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"workloads": workloads,
+	})
+}
+
 func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, start time.Time, requestID string) {
 	logger := func(fields logrus.Fields) *logrus.Entry {
 		return logrus.WithFields(apiFields(requestID, fields))
@@ -277,6 +344,7 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 			"method":    r.Method,
 			"path":      r.URL.Path,
 		}).Warn("approve request rejected: method not allowed")
+		w.Header().Set("Allow", "POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -299,6 +367,24 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 		return
 	}
 
+	workdir := h.paths.WorkDirPath(workload)
+	if _, err := os.Stat(workdir); err != nil {
+		if os.IsNotExist(err) {
+			logger(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
+			}).Warn("approve request rejected: workload directory not found")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
+			"component": "api",
+			"workload":  workload,
+		})).Error("approve request failed: workload directory stat error")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks, h.paths)
 	if err != nil {
 		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
@@ -317,24 +403,6 @@ func (h *serverHandler) handleApprove(w http.ResponseWriter, r *http.Request, st
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-	}
-
-	workdir := h.paths.WorkDirPath(workload)
-	if _, err := os.Stat(workdir); err != nil {
-		if os.IsNotExist(err) {
-			logger(logrus.Fields{
-				"component": "api",
-				"workload":  workload,
-			}).Warn("approve request rejected: workload directory not found")
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
-			"component": "api",
-			"workload":  workload,
-		})).Error("approve request failed: workload directory stat error")
-		w.WriteHeader(http.StatusInternalServerError)
-		return
 	}
 
 	switch mergedCfg.WorkloadType {
@@ -459,6 +527,7 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 			"method":    r.Method,
 			"path":      r.URL.Path,
 		}).Warn("reconcile request rejected: method not allowed")
+		w.Header().Set("Allow", "POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -488,6 +557,24 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	workdir := h.paths.WorkDirPath(workload)
+	if _, err := os.Stat(workdir); err != nil {
+		if os.IsNotExist(err) {
+			logger(logrus.Fields{
+				"component": "api",
+				"workload":  workload,
+			}).Warn("reconcile request rejected: workload directory not found")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
+			"component": "api",
+			"workload":  workload,
+		})).Error("reconcile request failed: workload directory stat error")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	mergedCfg, err := workloadConfigFromEnv(workload, h.cfg, h.locks, h.paths)
 	if err != nil {
 		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
@@ -508,40 +595,34 @@ func (h *serverHandler) handleReconcile(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	workdir := h.paths.WorkDirPath(workload)
-	if _, err := os.Stat(workdir); err != nil {
-		if os.IsNotExist(err) {
-			logger(logrus.Fields{
-				"component": "api",
-				"workload":  workload,
-			}).Warn("reconcile request rejected: workload directory not found")
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
-			"component": "api",
-			"workload":  workload,
-		})).Error("reconcile request failed: workload directory stat error")
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
 	triggerCtx := reconciler.WithTriggerSource(
 		reconciler.WithForceReconcile(reconciler.WithRequestID(h.ctx, requestID), true),
 		"api_manual",
 	)
 	if err := h.dispatcher.Trigger(triggerCtx, workload); err != nil {
-		logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
-			"component": "api",
-			"workload":  workload,
-		})).Warn("reconcile request rejected")
-		switch err {
-		case errWorkloadDisabled:
-			w.WriteHeader(http.StatusConflict)
-		default:
-			w.WriteHeader(http.StatusLocked)
+		if errors.Is(err, errWorkloadDisabled) && h.syncWorkloads != nil {
+			if syncErr := h.syncWorkloads(); syncErr == nil {
+				err = h.dispatcher.Trigger(triggerCtx, workload)
+			} else {
+				logrus.WithError(syncErr).WithFields(apiFields(requestID, logrus.Fields{
+					"component": "api",
+					"workload":  workload,
+				})).Warn("auto-discovery sync failed during reconcile trigger")
+			}
 		}
-		return
+		if err != nil {
+			logrus.WithError(err).WithFields(apiFields(requestID, logrus.Fields{
+				"component": "api",
+				"workload":  workload,
+			})).Warn("reconcile request rejected")
+			switch err {
+			case errWorkloadDisabled:
+				w.WriteHeader(http.StatusConflict)
+			default:
+				w.WriteHeader(http.StatusLocked)
+			}
+			return
+		}
 	}
 
 	logger(logrus.Fields{
@@ -717,6 +798,19 @@ func (d *dispatcher) DisableExcept(keep map[string]struct{}) {
 	d.mu.Unlock()
 }
 
+func (d *dispatcher) EnabledWorkloads() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, 0, len(d.enabled))
+	for name, enabled := range d.enabled {
+		if enabled {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (d *dispatcher) Wait(workload string, timeout time.Duration) bool {
 	d.mu.Lock()
 	queue, ok := d.queues[workload]
@@ -847,11 +941,13 @@ func workloadConfigFromEnv(workload string, cfg reconciler.Config, locks reconci
 func toSchedulerSpecs(specs []reconciler.WorkloadSpec) []scheduler.WorkloadSpec {
 	out := make([]scheduler.WorkloadSpec, 0, len(specs))
 	for _, spec := range specs {
-		out = append(out, scheduler.WorkloadSpec{
-			Name:     spec.Name,
-			Interval: spec.Interval,
-			Enabled:  spec.Enabled,
-		})
+		if spec.Enabled && spec.Interval > 0 {
+			out = append(out, scheduler.WorkloadSpec{
+				Name:     spec.Name,
+				Interval: spec.Interval,
+				Enabled:  spec.Enabled,
+			})
+		}
 	}
 	return out
 }
@@ -873,7 +969,7 @@ func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config
 	var problems []string
 	valid := make([]reconciler.WorkloadSpec, 0, len(specs))
 	for _, spec := range specs {
-		if !spec.Enabled || spec.Interval <= 0 {
+		if !spec.Enabled {
 			continue
 		}
 		envFile := paths.EnvFilePath(spec.Name)
@@ -903,7 +999,7 @@ func filterValidWorkloads(specs []reconciler.WorkloadSpec, cfg reconciler.Config
 func workloadsSet(specs []reconciler.WorkloadSpec) map[string]struct{} {
 	set := make(map[string]struct{}, len(specs))
 	for _, spec := range specs {
-		if spec.Enabled && spec.Interval > 0 {
+		if spec.Enabled {
 			set[spec.Name] = struct{}{}
 		}
 	}
