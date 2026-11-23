@@ -67,6 +67,8 @@ Tofuhut executes workload tools directly. The required binary must be available 
   - For `ansible`/`dnscontrol`: if `true`, Tofuhut hashes `playbook.yml`/`dnsconfig.js` and skips unchanged runs.
   - For `tofu`: currently ignored.
   - Manual `POST /reconcile/<workload>` still forces a run.
+- `RECONCILE_LOCK_GROUP` (optional)
+  - Workloads sharing the same non-empty lock group name are serialized in FIFO order (across both scheduled and manual runs).
 
 ### Hooks
 
@@ -150,7 +152,7 @@ On successful approved run, Tofuhut removes approval/pending artifacts.
 
 ## Observability
 
-- `GET /metrics` in `tofuhut server run` exposes Prometheus scrape output backed by OpenTelemetry metrics.
+- `GET /metrics` in `tofuhut server run` exposes Prometheus scrape output backed by OpenTelemetry metrics, including run metrics (`tofuhut_reconcile_runs_total`, `tofuhut_reconcile_duration_seconds`, `tofuhut_reconcile_inflight`) and lock group metrics (`tofuhut_reconcile_lock_acquisitions_total`, `tofuhut_reconcile_lock_wait_duration_seconds`, `tofuhut_reconcile_lock_waiting`, `tofuhut_reconcile_lock_held`).
 - API responses include CORS header `Access-Control-Allow-Origin: *`.
 
 ## Environment Propagation

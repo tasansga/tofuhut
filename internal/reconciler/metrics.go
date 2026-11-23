@@ -14,9 +14,13 @@ type runMetrics struct {
 
 	inited bool
 
-	runTotal    metric.Int64Counter
-	runDuration metric.Float64Histogram
-	runInFlight metric.Int64UpDownCounter
+	runTotal         metric.Int64Counter
+	runDuration      metric.Float64Histogram
+	runInFlight      metric.Int64UpDownCounter
+	lockAcquisitions metric.Int64Counter
+	lockWaitDuration metric.Float64Histogram
+	lockWaiting      metric.Int64UpDownCounter
+	lockHeld         metric.Int64UpDownCounter
 }
 
 var defaultRunMetrics runMetrics
@@ -45,26 +49,71 @@ func InitMetrics(meter metric.Meter) error {
 	if err != nil {
 		return err
 	}
+	lockAcquisitions, err := meter.Int64Counter(
+		"tofuhut_reconcile_lock_acquisitions_total",
+		metric.WithDescription("Total lock group acquisition attempts"),
+	)
+	if err != nil {
+		return err
+	}
+	lockWaitDuration, err := meter.Float64Histogram(
+		"tofuhut_reconcile_lock_wait_duration_seconds",
+		metric.WithDescription("Time spent waiting to acquire a lock group in seconds"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return err
+	}
+	lockWaiting, err := meter.Int64UpDownCounter(
+		"tofuhut_reconcile_lock_waiting",
+		metric.WithDescription("Current workloads waiting for a lock group"),
+	)
+	if err != nil {
+		return err
+	}
+	lockHeld, err := meter.Int64UpDownCounter(
+		"tofuhut_reconcile_lock_held",
+		metric.WithDescription("Current lock groups held by running workloads"),
+	)
+	if err != nil {
+		return err
+	}
 
 	defaultRunMetrics.mu.Lock()
 	defer defaultRunMetrics.mu.Unlock()
 	defaultRunMetrics.runTotal = runTotal
 	defaultRunMetrics.runDuration = runDuration
 	defaultRunMetrics.runInFlight = runInFlight
+	defaultRunMetrics.lockAcquisitions = lockAcquisitions
+	defaultRunMetrics.lockWaitDuration = lockWaitDuration
+	defaultRunMetrics.lockWaiting = lockWaiting
+	defaultRunMetrics.lockHeld = lockHeld
 	defaultRunMetrics.inited = true
 	return nil
 }
 
-func startRunMetric(ctx context.Context, workload, workloadType string) func(result string) {
+func getRunMetricsSnapshot() (runMetrics, bool) {
 	defaultRunMetrics.mu.RLock()
+	defer defaultRunMetrics.mu.RUnlock()
 	if !defaultRunMetrics.inited {
-		defaultRunMetrics.mu.RUnlock()
+		return runMetrics{}, false
+	}
+	return runMetrics{
+		runTotal:         defaultRunMetrics.runTotal,
+		runDuration:      defaultRunMetrics.runDuration,
+		runInFlight:      defaultRunMetrics.runInFlight,
+		lockAcquisitions: defaultRunMetrics.lockAcquisitions,
+		lockWaitDuration: defaultRunMetrics.lockWaitDuration,
+		lockWaiting:      defaultRunMetrics.lockWaiting,
+		lockHeld:         defaultRunMetrics.lockHeld,
+	}, true
+}
+
+func startRunMetric(ctx context.Context, workload, workloadType string) func(result string) {
+	m, ok := getRunMetricsSnapshot()
+	if !ok {
 		return func(string) {}
 	}
-	runTotal := defaultRunMetrics.runTotal
-	runDuration := defaultRunMetrics.runDuration
-	runInFlight := defaultRunMetrics.runInFlight
-	defaultRunMetrics.mu.RUnlock()
 
 	trigger := TriggerSourceFromContext(ctx)
 	if trigger == "" {
@@ -75,7 +124,7 @@ func startRunMetric(ctx context.Context, workload, workloadType string) func(res
 		attribute.String("workload_type", workloadType),
 		attribute.String("trigger", trigger),
 	)
-	runInFlight.Add(ctx, 1, attrs)
+	m.runInFlight.Add(ctx, 1, attrs)
 	start := time.Now()
 	return func(result string) {
 		resultAttrs := metric.WithAttributes(
@@ -84,8 +133,70 @@ func startRunMetric(ctx context.Context, workload, workloadType string) func(res
 			attribute.String("trigger", trigger),
 			attribute.String("result", result),
 		)
-		runTotal.Add(ctx, 1, resultAttrs)
-		runDuration.Record(ctx, time.Since(start).Seconds(), resultAttrs)
-		runInFlight.Add(ctx, -1, attrs)
+		m.runTotal.Add(ctx, 1, resultAttrs)
+		m.runDuration.Record(ctx, time.Since(start).Seconds(), resultAttrs)
+		m.runInFlight.Add(ctx, -1, attrs)
+	}
+}
+
+func startLockWaitMetric(ctx context.Context, group, workload string) func(result string) {
+	m, ok := getRunMetricsSnapshot()
+	if !ok {
+		return func(string) {}
+	}
+
+	metricCtx := context.WithoutCancel(ctx)
+	attrs := metric.WithAttributes(
+		attribute.String("lock_group", group),
+		attribute.String("workload", workload),
+	)
+	m.lockWaiting.Add(metricCtx, 1, attrs)
+	start := time.Now()
+	return func(result string) {
+		m.lockWaiting.Add(metricCtx, -1, attrs)
+		resultAttrs := metric.WithAttributes(
+			attribute.String("lock_group", group),
+			attribute.String("workload", workload),
+			attribute.String("result", result),
+			attribute.String("contended", "true"),
+		)
+		m.lockAcquisitions.Add(metricCtx, 1, resultAttrs)
+		m.lockWaitDuration.Record(metricCtx, time.Since(start).Seconds(), metric.WithAttributes(
+			attribute.String("lock_group", group),
+			attribute.String("workload", workload),
+			attribute.String("result", result),
+		))
+	}
+}
+
+func recordLockAcquiredImmediate(ctx context.Context, group, workload string) {
+	m, ok := getRunMetricsSnapshot()
+	if !ok {
+		return
+	}
+
+	metricCtx := context.WithoutCancel(ctx)
+	m.lockAcquisitions.Add(metricCtx, 1, metric.WithAttributes(
+		attribute.String("lock_group", group),
+		attribute.String("workload", workload),
+		attribute.String("result", "acquired"),
+		attribute.String("contended", "false"),
+	))
+}
+
+func startLockHeldMetric(ctx context.Context, group, workload string) func() {
+	m, ok := getRunMetricsSnapshot()
+	if !ok {
+		return func() {}
+	}
+
+	metricCtx := context.WithoutCancel(ctx)
+	attrs := metric.WithAttributes(
+		attribute.String("lock_group", group),
+		attribute.String("workload", workload),
+	)
+	m.lockHeld.Add(metricCtx, 1, attrs)
+	return func() {
+		m.lockHeld.Add(metricCtx, -1, attrs)
 	}
 }

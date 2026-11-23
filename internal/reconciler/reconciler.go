@@ -982,6 +982,11 @@ func MergeConfig(cfg Config, locks ConfigLocks, env map[string]string) (Config, 
 			cfg.ReconcileChangedOnly = parsed
 		}
 	}
+	if !locks.LockGroup {
+		if value, ok := env["RECONCILE_LOCK_GROUP"]; ok {
+			cfg.LockGroup = strings.TrimSpace(value)
+		}
+	}
 
 	if !locks.Upgrade {
 		if value, ok := env["UPGRADE"]; ok {

@@ -13,14 +13,20 @@ type Runner interface {
 
 // DefaultRunner runs the built-in reconciler flow.
 type DefaultRunner struct {
-	BaseConfig Config
-	Locks      ConfigLocks
-	Paths      Paths
+	BaseConfig  Config
+	Locks       ConfigLocks
+	Paths       Paths
+	LockManager *LockManager
 }
 
 // NewDefaultRunner builds a runner using resolved config and locks.
 func NewDefaultRunner(cfg Config, locks ConfigLocks, paths Paths) *DefaultRunner {
-	return &DefaultRunner{BaseConfig: cfg, Locks: locks, Paths: paths}
+	return &DefaultRunner{
+		BaseConfig:  cfg,
+		Locks:       locks,
+		Paths:       paths,
+		LockManager: NewLockManager(),
+	}
 }
 
 // Run executes a single reconciliation run for the workload.
@@ -45,6 +51,7 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 		"workload":        workload,
 		"mode":            mergedConfig.Mode,
 		"workload_type":   mergedConfig.WorkloadType,
+		"lock_group":      mergedConfig.LockGroup,
 		"upgrade":         mergedConfig.Upgrade,
 		"reconfigure":     mergedConfig.Reconfigure,
 		"gatus_cli_url":   mergedConfig.GatusURL,
@@ -54,6 +61,12 @@ func (r *DefaultRunner) Run(ctx context.Context, workload string) error {
 		startFields["request_id"] = requestID
 	}
 	logrus.WithFields(startFields).Debug("starting workload run")
+
+	unlock, err := r.LockManager.Acquire(ctx, mergedConfig.LockGroup, workload)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	if err := RunWithContext(ctx, workload, mergedConfig, envFile, envFromFile, r.Paths); err != nil {
 		return err

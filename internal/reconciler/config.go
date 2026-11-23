@@ -11,6 +11,7 @@ type Config struct {
 	PreHookTimeout       time.Duration
 	PostHookTimeout      time.Duration
 	ReconcileChangedOnly bool
+	LockGroup            string
 	Upgrade              bool
 	Reconfigure          bool
 	GatusURL             string
@@ -32,6 +33,7 @@ type ConfigLocks struct {
 	PreHookTimeout       bool
 	PostHookTimeout      bool
 	ReconcileChangedOnly bool
+	LockGroup            bool
 	Upgrade              bool
 	Reconfigure          bool
 	GatusURL             bool

@@ -110,3 +110,17 @@ func TestMergeConfigInvalidPreHookTimeout(t *testing.T) {
 	_, err := MergeConfig(Config{}, ConfigLocks{}, env)
 	assert.Error(t, err)
 }
+
+func TestMergeConfigLockGroup(t *testing.T) {
+	env := map[string]string{
+		"WORKLOAD_TYPE":        "ansible",
+		"RECONCILE_LOCK_GROUP": "  apt-hosts  ",
+	}
+	merged, err := MergeConfig(Config{}, ConfigLocks{}, env)
+	assert.NoError(t, err)
+	assert.Equal(t, "apt-hosts", merged.LockGroup)
+
+	locked, err := MergeConfig(Config{LockGroup: "locked-group"}, ConfigLocks{LockGroup: true}, env)
+	assert.NoError(t, err)
+	assert.Equal(t, "locked-group", locked.LockGroup)
+}
